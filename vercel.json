@@ -22,5 +22,11 @@
       "destination": "https://toneofvoice.app/:path*",
       "permanent": true
     }
+  ],
+  "crons": [
+    {
+      "path": "/api/cron/keep-alive",
+      "schedule": "0 8 * * 1,4"
+    }
   ]
 }
