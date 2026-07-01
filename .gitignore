@@ -14,6 +14,9 @@
 style-guide-test-output.md
 style-guide-real-website-output.md
 
+# local session/cookie dumps (never commit auth state)
+cookies.txt
+
 # generated PDFs from script
 scripts/output/
 
