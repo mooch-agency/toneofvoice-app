@@ -1,6 +1,6 @@
 # Release notes - November 2026
 
-A full audit of the codebase (see `docs/audit/`) followed by fixes, done test-first. Tests went from 4 to about 800; TypeScript errors from 148 to 0; lint errors from 243 to 0. The production build now fails on type errors instead of hiding them.
+A full audit of the codebase (see `docs/audit/`) followed by fixes, done test-first, then an independent review of the result and a second round of fixes. Tests went from 4 to 824 (75 files); TypeScript errors from 148 to 0; lint errors from 243 to 0. The production build now fails on type errors instead of hiding them, and builds without any environment variables. Production code shrank by about 24,000 lines.
 
 ## Security
 - Removed `/api/generate-styleguide`, which gave anyone the full paid guide without signing in. Paid sections now come only from `/api/expand-style-guide`, which checks the plan on the server.
@@ -39,6 +39,14 @@ A full audit of the codebase (see `docs/audit/`) followed by fixes, done test-fi
 ## Cleanup
 - About 160 dead files and 43 unused dependencies removed (old Plate playground, blog system, legacy pages).
 - `middleware.ts` renamed to `proxy.ts` for Next 16; ESLint flat config; `.env.example`.
+
+## Review round
+- Webhook acknowledges events for subscriptions no profile owns (no endless retries).
+- First-time checkouts share one Stripe customer, so parallel checkouts cannot double-bill.
+- Expanding a guide keeps a "Questions?" section the user edited, and tolerates older saved brand details.
+- The migration drops every old policy, so leftover public-read policies cannot undo RLS.
+- Drafts stay claimable while the visitor is active; a guide blocked at the limit saves after an upgrade or delete.
+- The guide is read-only while the full guide generates; sign-out saves pending edits first and resets analytics identity.
 
 ## Owner actions
 See the end of `docs/audit/PLAN.md`.
