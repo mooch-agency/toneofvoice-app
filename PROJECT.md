@@ -89,7 +89,6 @@ After sign-in, `/auth/claim` and `AutoSaveGuide` save the pending draft (`lib/pe
 | `webhook` | Stripe signature | Subscription events (deduped, retried on failure) |
 | `ai/command` | paid, rate limited | Plate.js AI commands (model fixed on the server) |
 | `export-pdf` | user, rate limited | Server PDF (JavaScript off, network locked down) |
-| `post-to-webflow` | shared secret | Zapier to Webflow blog publishing |
 | `cron/keep-alive` | `CRON_SECRET` | Keeps Supabase awake |
 
 Shared route helpers: `lib/api-auth.ts` (`requireUser`, `withRouteErrors`, `tooManyRequests`) and `lib/rate-limit-durable.ts` (`checkRateLimit`: shared Postgres counter from migration 003, falling back to the in-memory `lib/rate-limit.ts`).

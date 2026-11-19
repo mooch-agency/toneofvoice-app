@@ -30,7 +30,7 @@ IDs below (SEC-n, AI-n, FE-n, DEP-n, ...) point into those reports.
 | D4 | Remove orphan pages `/demo`, `/preview`, `/full-access`, `/brand-details`. Redirects live in `next.config.js`. | No inbound links (FE SIMP-2). |
 | D5 | Rate limiting uses a shared database counter (`lib/rate-limit-durable.ts`, migration 003) and falls back to the in-memory limiter (`lib/rate-limit.ts`) until the migration is applied or if the database is unreachable. | No Redis in the stack; Postgres is already there. |
 | D6 | The database schema is not in the repo. WP-A writes a reviewed migration for RLS, column privileges and the guide-limit trigger. **The owner must review and apply it.** | SEC-10 cannot be verified from code. |
-| D7 | `/api/post-to-webflow` stays but requires `WEBFLOW_WEBHOOK_SECRET` (fails closed). Items still publish directly, as before. | It may still be used by Zapier. |
+| D7 | `/api/post-to-webflow` removed (19 Nov 2026): the Zapier to Webflow publishing is no longer used. | Owner confirmed. |
 | D8 | Keep `ai@5` with `@ai-sdk/react@2` (done in Phase 0). | Two copies of `ai` caused the editor type errors. |
 
 ## Phase 0 — foundation (done by orchestrator)
@@ -137,7 +137,6 @@ After the independent review, three remaining limits were closed in code:
 ## Owner actions (cannot be done from code)
 
 - Review and apply `supabase/migrations/002_security_hardening.sql` and `003_rate_limits.sql` (staging first).
-- Set `WEBFLOW_WEBHOOK_SECRET` (and in Zapier) if Webflow publishing is still used.
-- Set the Stripe webhook endpoint's API version to `2025-03-31.basil` (matches `lib/stripe.ts`) and subscribe it to `checkout.session.completed`, `customer.subscription.updated` and `customer.subscription.deleted`.
+- Stripe webhook: verified 19 Nov 2026. The live endpoint `https://toneofvoice.app/api/webhook` is already on `2025-03-31.basil` and subscribed to `checkout.session.completed`, `customer.subscription.updated` and `customer.subscription.deleted` (plus three extra events the handler ignores). Nothing to do.
 - No portal plan-switching setting is needed: Pro → Agency upgrades happen in-app (`POST /api/change-plan`, prorated difference charged immediately). The Stripe Billing Portal ("Manage") is only used for managing payment details and cancelling. (Optional: enabling plan switching there lets Agency users downgrade to Pro without cancelling; nothing in the app depends on it.)
 - Rotate the old `ADMIN_BLOG_PASSWORD` wherever it is reused (SEC-19). The deleted `docs/SECURITY_REVIEW.md` held it in plain text, so it is still in git history.
