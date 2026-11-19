@@ -30,3 +30,10 @@ export function identify(userId: string, properties?: Properties) {
     if (properties) mixpanel.people.set(properties)
   } catch {}
 }
+
+/** Forget the identified user (call on sign-out) so the next visitor gets a fresh distinct id. */
+export function reset() {
+  try {
+    if (isReady()) mixpanel.reset()
+  } catch {}
+}

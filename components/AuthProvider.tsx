@@ -3,7 +3,8 @@
 import * as React from "react";
 import { createClient } from "@/lib/supabase-browser";
 import type { User } from "@supabase/supabase-js";
-import { identify as mpIdentify } from "@/lib/mixpanel";
+import { identify as mpIdentify, reset as mpReset } from "@/lib/mixpanel";
+import { flushPendingAutosaves } from "@/hooks/use-autosave";
 import mixpanel from "mixpanel-browser";
 
 type AuthContextValue = {
@@ -25,10 +26,17 @@ const APP_STORAGE_KEYS = [
   "draftCreatedAt",
 ];
 
+/** Set for internal team members (see the identify effect); read by MixpanelProvider. */
+const MP_INTERNAL_USER_KEY = "mp_internal_user";
+
+/** Don't let sign-out hang on a stalled save. */
+const FLUSH_TIMEOUT_MS = 5000;
+
 /** Remove drafts so the next person on a shared browser doesn't inherit them (FE-9). */
 function clearAppStorage() {
   try {
     APP_STORAGE_KEYS.forEach((k) => localStorage.removeItem(k));
+    localStorage.removeItem(MP_INTERNAL_USER_KEY);
     Object.keys(localStorage)
       .filter((k) => k.startsWith("guide-edits-"))
       .forEach((k) => localStorage.removeItem(k));
@@ -102,7 +110,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
       const userEmail = user.email?.toLowerCase() ?? "";
       if (internalEmails.length > 0 && internalEmails.includes(userEmail)) {
-        localStorage.setItem("mp_internal_user", "true");
+        localStorage.setItem(MP_INTERNAL_USER_KEY, "true");
         try {
           // Drop all subsequent events client-side; never reach Mixpanel servers
           mixpanel.register({ $ignore: true });
@@ -116,11 +124,32 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [user]);
 
   const signOut = React.useCallback(async () => {
+    // Save the last edits while the session is still valid.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        flushPendingAutosaves(),
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, FLUSH_TIMEOUT_MS);
+        }),
+      ]);
+    } catch {
+      // never block sign-out on a failed save
+    } finally {
+      clearTimeout(timer);
+    }
+
     const supabase = createClient();
     try {
       await supabase.auth.signOut();
     } finally {
       clearAppStorage();
+      // The next person on this browser must not be attributed to this user.
+      try {
+        mpReset();
+      } catch {
+        // analytics must never block sign-out
+      }
     }
     window.location.href = "/";
   }, []);

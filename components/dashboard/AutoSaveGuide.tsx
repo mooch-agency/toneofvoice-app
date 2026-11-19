@@ -4,13 +4,27 @@ import { useEffect } from "react"
 import { useRouter } from "next/navigation"
 import { useAuth } from "@/components/AuthProvider"
 import { useToast } from "@/hooks/use-toast"
-import { readPendingDraft, savePendingDraft } from "@/lib/pending-draft"
+import { DRAFT_STAMP_KEY, readPendingDraft, savePendingDraft } from "@/lib/pending-draft"
 
 // Module-level flag prevents concurrent saves across instances
 let saving = false
 
-/** Per tab: once a save hits the guide limit, do not try again for this user. */
-const blockedKey = (userId: string) => `autosave-blocked:${userId}`
+const BLOCK_PREFIX = "autosave-blocked:"
+
+/**
+ * Per tab: once a save hits the guide limit, do not try again for this user
+ * and this draft. A new draft (new stamp) gets one fresh try, and
+ * SubscriptionRefresh lifts every block after a checkout (see clearAutoSaveBlocks).
+ */
+function blockedKey(userId: string): string {
+  let stamp = ""
+  try {
+    stamp = localStorage.getItem(DRAFT_STAMP_KEY) ?? ""
+  } catch {
+    // storage unavailable
+  }
+  return `${BLOCK_PREFIX}${userId}:${stamp}`
+}
 
 function isBlocked(userId: string): boolean {
   try {
@@ -28,11 +42,27 @@ function block(userId: string) {
   }
 }
 
+/** Forget guide-limit blocks, e.g. after the plan changed. */
+export function clearAutoSaveBlocks() {
+  try {
+    Object.keys(sessionStorage)
+      .filter((k) => k.startsWith(BLOCK_PREFIX))
+      .forEach((k) => sessionStorage.removeItem(k))
+  } catch {
+    // storage unavailable
+  }
+}
+
+/** Back from Stripe checkout: SubscriptionRefresh verifies the plan first, then saves the draft. */
+function returningFromCheckout(): boolean {
+  return new URLSearchParams(window.location.search).get("subscription") === "success"
+}
+
 /**
  * After sign-in, saves a fresh pending preview guide (see lib/pending-draft)
  * to the account. Runs on /guide and /dashboard. On success it
  * clears the preview and opens the saved guide; at the guide limit it tells
- * the user once and stops.
+ * the user once and stops (until the draft or the plan changes).
  */
 export function AutoSaveGuide() {
   const { user, loading: authLoading } = useAuth()
@@ -40,7 +70,7 @@ export function AutoSaveGuide() {
   const { toast } = useToast()
 
   useEffect(() => {
-    if (authLoading || !user || saving || isBlocked(user.id)) return
+    if (authLoading || !user || saving || isBlocked(user.id) || returningFromCheckout()) return
 
     const draft = readPendingDraft()
     if (!draft) return

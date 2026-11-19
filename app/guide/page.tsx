@@ -15,6 +15,7 @@ import { AutoSaveGuide } from "@/components/dashboard/AutoSaveGuide"
 import { useGuide, type BrandDetails } from "@/hooks/use-guide"
 import { useAutosave, type AutosaveStatus } from "@/hooks/use-autosave"
 import { hasUnlockPlaceholders } from "@/lib/guide-placeholders"
+import { storePreview } from "@/lib/pending-draft"
 import { MetaPixel } from "@/lib/meta-pixel"
 import { isPaidTier } from "@/lib/tiers"
 import { isPaidPlan, useCheckout } from "./_hooks/use-checkout"
@@ -61,11 +62,7 @@ function GuideContent() {
   const handleUserEdit = useCallback(
     (markdown: string) => {
       if (!isPreviewFlow) return setHasEdits(true)
-      try {
-        localStorage.setItem("previewContent", markdown)
-      } catch {
-        // storage full or blocked: the edit stays in memory
-      }
+      storePreview(markdown)
     },
     [isPreviewFlow]
   )
@@ -113,6 +110,23 @@ function GuideContent() {
   )
   const saved = useSavedGuide(guideId, onSavedLoaded)
 
+  // "Generate full guide" (up to ~2 min): the server only saves over the version it
+  // generated from, so the guide is read-only and autosave is paused meanwhile.
+  const onExpanded = useCallback(
+    (markdown: string) => {
+      setContent(markdown)
+      setHasEdits(false) // the server already saved the expanded guide
+      setEditorKey((k) => k + 1)
+      setExpandedKey(Date.now())
+    },
+    [setContent, setEditorKey]
+  )
+  const { expanding, expand } = useExpandGuide({ guideId, onExpanded })
+  const startExpand = () => {
+    handleModeSwitch("preview")
+    void expand()
+  }
+
   const showSaveError = useCallback(
     () =>
       toast({
@@ -127,7 +141,7 @@ function GuideContent() {
     content,
     brandDetails,
     planType: guideType,
-    enabled: !isPreviewFlow && hasEdits,
+    enabled: !isPreviewFlow && hasEdits && !expanding,
     onError: showSaveError,
   })
 
@@ -159,15 +173,6 @@ function GuideContent() {
     setPaymentOpen(true)
   }
 
-  const onExpanded = useCallback(
-    (markdown: string) => {
-      setContent(markdown)
-      setEditorKey((k) => k + 1)
-      setExpandedKey(Date.now())
-    },
-    [setContent, setEditorKey]
-  )
-  const { expanding, expand } = useExpandGuide({ guideId, onExpanded })
   const showExpandBanner = !isPreviewFlow && isPaidTier(tier) && hasUnlockPlaceholders(content)
 
   const brandName = brandDetails?.name || "Your Brand"
@@ -247,17 +252,18 @@ function GuideContent() {
         showDashboardLink={!!user}
         onUpgrade={() => handleUpgrade("unlock-style-guide")}
         viewMode={viewMode}
-        onModeSwitch={handleModeSwitch}
+        // Read-only while generating: no edit toggle, no new sections.
+        onModeSwitch={expanding ? undefined : handleModeSwitch}
         showEditTools
         headerContent={headerContent}
-        onAddSection={handleAddSection}
+        onAddSection={expanding ? undefined : handleAddSection}
       >
         {showExpandBanner && (
           <ExpandBanner
             expanding={expanding}
             // Wait for pending edits to save so they cannot overwrite the generated sections.
             disabled={autosave.status === "pending" || autosave.status === "saving"}
-            onExpand={expand}
+            onExpand={startExpand}
           />
         )}
         {!isPreviewFlow && showPostExport && (
@@ -273,7 +279,7 @@ function GuideContent() {
         <GuideView
           sections={sections}
           scrollContainerRef={scrollContainerRef}
-          viewMode={viewMode}
+          viewMode={expanding ? "preview" : viewMode}
           onContentChange={updateContent}
           brandName={brandName}
           onBrandNameChange={handleBrandNameChange}

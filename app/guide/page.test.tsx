@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react"
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 const replace = vi.fn()
@@ -20,7 +20,13 @@ vi.mock("@/lib/mixpanel", () => ({ track: vi.fn() }))
 vi.mock("@/lib/meta-pixel", () => ({ MetaPixel: { viewContent: vi.fn(), initiateCheckout: vi.fn() } }))
 vi.mock("@/lib/fonts", () => ({ playfairDisplay: { variable: "font-display" } }))
 vi.mock("@/lib/supabase-browser", () => ({ createClient: () => ({}) }))
-vi.mock("@/components/editor/GuideEditor", () => ({ GuideEditor: () => <div data-testid="editor" /> }))
+vi.mock("@/components/editor/GuideEditor", () => ({
+  GuideEditor: ({ onChange }: { onChange: (md: string) => void }) => (
+    <button data-testid="editor" onClick={() => onChange("## About Acme\n\nEdited.")}>
+      editor
+    </button>
+  ),
+}))
 
 import GuidePage from "./page"
 
@@ -102,5 +108,41 @@ describe("/guide", () => {
     )
     render(<GuidePage />)
     expect(await screen.findByText(/to rewrite any section instantly/)).toBeInTheDocument()
+  })
+
+  it("refreshes the draft timestamp when the preview is edited", async () => {
+    localStorage.setItem("brandDetails", JSON.stringify({ name: "Acme" }))
+    localStorage.setItem("previewContent", GUIDE)
+    render(<GuidePage />)
+    fireEvent.click(await screen.findByRole("button", { name: /edit guide/i }))
+    localStorage.setItem("draftCreatedAt", "1") // loading the preview stamps it; isolate the edit
+    fireEvent.click(await screen.findByTestId("editor"))
+    await waitFor(() => expect(Number(localStorage.getItem("draftCreatedAt"))).toBeGreaterThan(1))
+    expect(localStorage.getItem("previewContent")).toContain("Edited.")
+  })
+
+  it("makes the guide read-only while the full guide is generating", async () => {
+    authState.user = { id: "u1" }
+    params = new URLSearchParams("guideId=g1")
+    fetchMock.mockImplementation((url: string) =>
+      url.startsWith("/api/load-style-guide")
+        ? Promise.resolve(
+            json({ id: "g1", content_md: GUIDE, brand_name: "Acme", plan_type: "core", subscription_tier: "pro" })
+          )
+        : url === "/api/expand-style-guide"
+          ? new Promise(() => {})
+          : Promise.resolve(json({}, 404))
+    )
+    render(<GuidePage />)
+    fireEvent.click(await screen.findByRole("button", { name: /edit guide/i }))
+    expect(await screen.findByTestId("editor")).toBeInTheDocument()
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /generate full guide/i }))
+    })
+    expect(screen.getByRole("button", { name: /generating/i })).toBeDisabled()
+    expect(screen.queryByTestId("editor")).not.toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: /^(edit guide|preview)$/i })).not.toBeInTheDocument()
+    expect(fetchMock.mock.calls.map(([url]) => url)).not.toContain("/api/save-style-guide")
   })
 })

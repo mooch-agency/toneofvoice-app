@@ -8,7 +8,7 @@ vi.mock("@/hooks/use-toast", () => ({ useToast: () => ({ toast }) }))
 vi.mock("next/navigation", () => ({ useRouter: () => ({ replace, refresh, push: vi.fn() }) }))
 vi.mock("@/components/AuthProvider", () => ({ useAuth: () => ({ user: { id: "u1" }, loading: false }) }))
 
-import { AutoSaveGuide } from "./AutoSaveGuide"
+import { AutoSaveGuide, clearAutoSaveBlocks } from "./AutoSaveGuide"
 
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status })
 
@@ -60,6 +60,43 @@ describe("AutoSaveGuide", () => {
     await new Promise((r) => setTimeout(r, 0))
     expect(fetchMock).not.toHaveBeenCalled()
     expect(localStorage.getItem("previewContent")).toBeNull()
+  })
+
+  it("tries once more for a new draft after a guide-limit block", async () => {
+    fetchMock.mockResolvedValue(json({ error: "limit" }, 403))
+    const { unmount } = render(<AutoSaveGuide />)
+    await waitFor(() => expect(toast).toHaveBeenCalledTimes(1))
+    unmount()
+
+    localStorage.setItem("draftCreatedAt", String(Date.now() + 1000))
+    fetchMock.mockResolvedValue(json({ guide: { id: "g2" } }))
+    render(<AutoSaveGuide />)
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+  })
+
+  it("retries after clearAutoSaveBlocks (e.g. a verified upgrade)", async () => {
+    fetchMock.mockResolvedValue(json({ error: "limit" }, 403))
+    const { unmount } = render(<AutoSaveGuide />)
+    await waitFor(() => expect(toast).toHaveBeenCalledTimes(1))
+    unmount()
+
+    clearAutoSaveBlocks()
+    fetchMock.mockResolvedValue(json({ guide: { id: "g2" } }))
+    render(<AutoSaveGuide />)
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(refresh).toHaveBeenCalled())
+  })
+
+  it("leaves the save to SubscriptionRefresh while returning from checkout", async () => {
+    window.history.pushState({}, "", "/dashboard?subscription=success&session_id=cs_1")
+    try {
+      fetchMock.mockResolvedValue(json({ guide: { id: "g2" } }))
+      render(<AutoSaveGuide />)
+      await new Promise((r) => setTimeout(r, 0))
+      expect(fetchMock).not.toHaveBeenCalled()
+    } finally {
+      window.history.pushState({}, "", "/")
+    }
   })
 
   it("does nothing without a stored preview", async () => {

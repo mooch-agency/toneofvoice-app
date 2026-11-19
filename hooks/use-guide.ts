@@ -31,7 +31,10 @@ const COVER_SECTION: StyleGuideSection = {
 
 /**
  * Sidebar highlight that follows scrolling, plus click-to-scroll.
- * The observer is rebuilt only when the set of section ids changes, not on every edit.
+ * The observer is rebuilt when the set of section ids changes. The section DOM
+ * is also replaced with the same ids (edit/preview switch, remount after
+ * expand, async editor render), so a MutationObserver re-observes whenever the
+ * elements behind those ids change. Typing does not trigger a re-observe.
  */
 export function useScrollSpy(sectionIds: string[], scrollContainerRef: RefObject<HTMLElement | null>) {
   const [activeSectionId, setActiveSectionId] = useState("cover")
@@ -56,13 +59,25 @@ export function useScrollSpy(sectionIds: string[], scrollContainerRef: RefObject
       },
       { root: container, rootMargin: "-20% 0px -60% 0px", threshold: 0 }
     )
-    ids.forEach((id) => {
-      const el = document.getElementById(id)
-      if (el) observer.observe(el)
-    })
+
+    let observed: HTMLElement[] = []
+    const sync = () => {
+      const elements = ids.map((id) => document.getElementById(id)).filter((el): el is HTMLElement => !!el)
+      if (elements.length === observed.length && elements.every((el, i) => el === observed[i])) return
+      observer.disconnect()
+      elements.forEach((el) => observer.observe(el))
+      observed = elements
+    }
+    sync()
+    const mutations = new MutationObserver(sync)
+    mutations.observe(container, { childList: true, subtree: true })
+
     // Keep the highlight valid when sections change (e.g. after expand)
     setActiveSectionId((prev) => (ids.includes(prev) ? prev : "cover"))
-    return () => observer.disconnect()
+    return () => {
+      mutations.disconnect()
+      observer.disconnect()
+    }
   }, [idsKey, scrollContainerRef])
 
   return { activeSectionId, handleSectionSelect }

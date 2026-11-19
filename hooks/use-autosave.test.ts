@@ -1,6 +1,6 @@
 import { act, renderHook } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { useAutosave, type UseAutosaveOptions } from "./use-autosave"
+import { flushPendingAutosaves, useAutosave, type UseAutosaveOptions } from "./use-autosave"
 
 const brandDetails = { name: "Acme" }
 
@@ -132,5 +132,47 @@ describe("useAutosave", () => {
     await act(async () => vi.advanceTimersByTime(2000))
     expect(result.current.status).toBe("error")
     expect(onError).toHaveBeenCalledTimes(1)
+  })
+
+  it("flushPendingAutosaves sends the pending edit and resolves once it is saved", async () => {
+    let resolve!: (r: Response) => void
+    fetchMock.mockImplementation(() => new Promise<Response>((r) => (resolve = r)))
+    setup()
+    await act(async () => vi.advanceTimersByTime(500))
+
+    let done = false
+    const flushed = flushPendingAutosaves().then(() => (done = true))
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).content_md).toBe("## About\n\nv1")
+    await act(async () => {})
+    expect(done).toBe(false)
+    await act(async () => resolve(okResponse()))
+    await flushed
+    expect(done).toBe(true)
+
+    // Nothing pending any more: the debounce timer does not save it again.
+    await act(async () => vi.advanceTimersByTime(5000))
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it("flushPendingAutosaves waits for a save already in flight", async () => {
+    let resolve!: (r: Response) => void
+    fetchMock.mockImplementation(() => new Promise<Response>((r) => (resolve = r)))
+    setup()
+    await act(async () => vi.advanceTimersByTime(2000))
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+
+    let done = false
+    const flushed = flushPendingAutosaves().then(() => (done = true))
+    await act(async () => {})
+    expect(done).toBe(false)
+    await act(async () => resolve(okResponse()))
+    await flushed
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it("flushPendingAutosaves resolves immediately when nothing is mounted", async () => {
+    await expect(flushPendingAutosaves()).resolves.toBeUndefined()
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 })

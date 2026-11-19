@@ -46,6 +46,18 @@ function post(payload: SavePayload, init: RequestInit = {}) {
   })
 }
 
+/** Every mounted autosave registers here so sign-out can save the last edits first. */
+const flushers = new Set<() => Promise<void>>()
+
+/**
+ * Save every pending edit now and wait until those saves (and any already in
+ * flight) finish. Call before ending the session: requests sent after sign-out
+ * are unauthenticated and would lose up to `delayMs` of typing. Never rejects.
+ */
+export async function flushPendingAutosaves(): Promise<void> {
+  await Promise.all([...flushers].map((flushAndWait) => flushAndWait().catch(() => {})))
+}
+
 /**
  * Debounced autosave for a saved guide. Only the latest request counts (older
  * ones are aborted), and a pending save is flushed with `keepalive` when the
@@ -64,6 +76,7 @@ export function useAutosave({
   const pendingRef = useRef<SavePayload | null>(null)
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const controllerRef = useRef<AbortController | null>(null)
+  const inflightRef = useRef<Promise<void> | null>(null)
   const onErrorRef = useRef(onError)
 
   useEffect(() => {
@@ -86,7 +99,7 @@ export function useAutosave({
     controllerRef.current = controller
     setStatus("saving")
 
-    post(payload, { signal: controller.signal })
+    const request = post(payload, { signal: controller.signal })
       .then((res) => {
         if (controller.signal.aborted) return
         if (!res.ok) throw new Error(`Save failed (${res.status})`)
@@ -97,7 +110,24 @@ export function useAutosave({
         setStatus("error")
         onErrorRef.current?.()
       })
+      .finally(() => {
+        if (inflightRef.current === request) inflightRef.current = null
+      })
+    inflightRef.current = request
   }, [])
+
+  /** Save what is pending now and resolve when the latest save has finished (see flushPendingAutosaves). */
+  const flushAndWait = useCallback(async () => {
+    if (pendingRef.current) save()
+    await inflightRef.current
+  }, [save])
+
+  useEffect(() => {
+    flushers.add(flushAndWait)
+    return () => {
+      flushers.delete(flushAndWait)
+    }
+  }, [flushAndWait])
 
   /** Send whatever is pending without waiting: survives navigation and tab close. */
   const flush = useCallback(() => {

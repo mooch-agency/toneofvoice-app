@@ -1,10 +1,11 @@
-import { act, renderHook, waitFor } from "@testing-library/react"
+import { act, render, renderHook, waitFor } from "@testing-library/react"
+import { createElement, useRef } from "react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 const authState: { user: { id: string } | null; loading: boolean } = { user: { id: "u1" }, loading: false }
 vi.mock("@/components/AuthProvider", () => ({ useAuth: () => authState }))
 
-import { useGuide } from "./use-guide"
+import { useGuide, useScrollSpy } from "./use-guide"
 
 const tierResponse = (tier: string) => new Response(JSON.stringify({ subscription_tier: tier }), { status: 200 })
 
@@ -86,5 +87,77 @@ describe("useGuide content changes", () => {
     act(() => result.current.updateContent("## About\n\nEdited."))
     expect(result.current.content).toBe("## About\n\nEdited.")
     expect(onContentChange).toHaveBeenCalledWith("## About\n\nEdited.")
+  })
+})
+
+describe("useScrollSpy", () => {
+  let observed: Set<Element>
+  let instances: { callback: IntersectionObserverCallback }[]
+
+  beforeEach(() => {
+    observed = new Set()
+    instances = []
+    vi.stubGlobal(
+      "IntersectionObserver",
+      class {
+        callback: IntersectionObserverCallback
+        constructor(cb: IntersectionObserverCallback) {
+          this.callback = cb
+          instances.push(this)
+        }
+        observe(el: Element) {
+          observed.add(el)
+        }
+        unobserve(el: Element) {
+          observed.delete(el)
+        }
+        disconnect() {
+          observed.clear()
+        }
+      },
+    )
+  })
+
+  afterEach(() => vi.unstubAllGlobals())
+
+  const IDS = ["cover", "about"]
+  function Spy({ version }: { version: number }) {
+    const ref = useRef<HTMLDivElement>(null)
+    const { activeSectionId } = useScrollSpy(IDS, ref)
+    // Same ids, new DOM nodes on every version (edit/preview switch, expand remount).
+    return createElement(
+      "div",
+      { ref },
+      createElement(
+        "div",
+        { key: version },
+        IDS.map((id) => createElement("section", { key: id, id }, id)),
+      ),
+      createElement("output", null, activeSectionId),
+    )
+  }
+
+  const current = () => IDS.map((id) => document.getElementById(id)!)
+
+  it("observes the section elements", () => {
+    render(createElement(Spy, { version: 0 }))
+    expect([...observed]).toEqual(current())
+  })
+
+  it("re-observes when the sections are re-rendered with the same ids", async () => {
+    const { rerender, container } = render(createElement(Spy, { version: 0 }))
+    rerender(createElement(Spy, { version: 1 }))
+    await waitFor(() => expect([...observed]).toEqual(current()))
+    expect([...observed].every((el) => el.isConnected)).toBe(true)
+
+    // The highlight still follows the new nodes.
+    const about = document.getElementById("about")!
+    act(() => {
+      instances.at(-1)!.callback(
+        [{ isIntersecting: true, target: about } as unknown as IntersectionObserverEntry],
+        {} as IntersectionObserver,
+      )
+    })
+    expect(container.querySelector("output")!.textContent).toBe("about")
   })
 })

@@ -47,7 +47,37 @@ describe("useExpandGuide", () => {
     const { result } = renderHook(() => useExpandGuide({ guideId: "g1", onExpanded }))
     await act(() => result.current.expand())
     expect(onExpanded).not.toHaveBeenCalled()
-    expect(toast.mock.calls[0][0].description).toMatch(/reload/i)
+    expect(toast.mock.calls[0][0].description).toBe("This guide was edited while generating. Reload and try again.")
+  })
+
+  it("passes on the server's message when the guide is already being generated (409)", async () => {
+    fetchMock.mockResolvedValue(json({ error: "This guide is already being generated." }, 409))
+    const { result } = renderHook(() => useExpandGuide({ guideId: "g1", onExpanded }))
+    await act(() => result.current.expand())
+    expect(toast.mock.calls[0][0].description).toMatch(/already being generated/i)
+  })
+
+  it("asks for a reload when the guide already has its full content (400)", async () => {
+    fetchMock.mockResolvedValue(json({ error: "Guide already has full content" }, 400))
+    const { result } = renderHook(() => useExpandGuide({ guideId: "g1", onExpanded }))
+    await act(() => result.current.expand())
+    const { description } = toast.mock.calls[0][0]
+    expect(description).toMatch(/already (has|complete)/i)
+    expect(description).toMatch(/reload/i)
+  })
+
+  it("shows the server's error and Retry-After on 429", async () => {
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ error: "Too many requests. Please wait and try again." }), {
+        status: 429,
+        headers: { "Retry-After": "90" },
+      }),
+    )
+    const { result } = renderHook(() => useExpandGuide({ guideId: "g1", onExpanded }))
+    await act(() => result.current.expand())
+    const { description } = toast.mock.calls[0][0]
+    expect(description).toContain("Too many requests. Please wait and try again.")
+    expect(description).toMatch(/2 minutes/)
   })
 
   it("rejects content that still has unlock placeholders", async () => {
