@@ -1,141 +1,52 @@
 'use client';
 
 import type { PlateEditor } from 'platejs/react';
-import type { NodeEntry, Path, TElement } from 'platejs';
+import type { Path, TElement } from 'platejs';
 
-import { KEYS, PathApi } from 'platejs';
+import { KEYS } from 'platejs';
+import { toggleList, unwrapList } from '@platejs/list-classic';
 
 /**
- * Simplified transforms for our style guide editor.
- * Only supports: headings, paragraph, blockquote, lists.
+ * Block transforms for the "Turn into" menu. The guide editor loads the
+ * classic list plugins (ul/ol/li/lic), so lists are toggled with those; the
+ * menu still uses the KEYS.ul / KEYS.ol values.
  */
 
-const insertList = (editor: PlateEditor, type: string) => {
-  editor.tf.insertNodes(
-    editor.api.create.block({
-      indent: 1,
-      listStyleType: type,
-    }),
-    { select: true }
-  );
+/** Menu value → classic list container type. */
+const CLASSIC_LIST: Record<string, string> = {
+  [KEYS.ul]: KEYS.ulClassic,
+  [KEYS.ol]: KEYS.olClassic,
 };
 
-const insertBlockMap: Record<
-  string,
-  (editor: PlateEditor, type: string) => void
-> = {
-  [KEYS.ul]: insertList,
-  [KEYS.ol]: insertList,
+/** Classic list container type → menu value. */
+const MENU_VALUE: Record<string, string> = {
+  [KEYS.ulClassic]: KEYS.ul,
+  [KEYS.olClassic]: KEYS.ol,
 };
 
-export const insertBlock = (
-  editor: PlateEditor,
-  type: string,
-  options: { upsert?: boolean } = {}
-) => {
-  const { upsert = false } = options;
-
-  editor.tf.withoutNormalizing(() => {
-    const block = editor.api.block();
-
-    if (!block) return;
-
-    const [currentNode, path] = block;
-    const isCurrentBlockEmpty = editor.api.isEmpty(currentNode);
-    const currentBlockType = getBlockType(currentNode);
-
-    const isSameBlockType = type === currentBlockType;
-
-    if (upsert && isCurrentBlockEmpty && isSameBlockType) {
-      return;
-    }
-
-    if (type in insertBlockMap) {
-      insertBlockMap[type](editor, type);
-    } else {
-      editor.tf.insertNodes(editor.api.create.block({ type }), {
-        at: PathApi.next(path),
-        select: true,
-      });
-    }
-
-    if (!isSameBlockType) {
-      editor.tf.removeNodes({ previousEmptyBlock: true });
-    }
-  });
-};
-
-const setList = (
-  editor: PlateEditor,
-  type: string,
-  entry: NodeEntry<TElement>
-) => {
-  editor.tf.setNodes(
-    editor.api.create.block({
-      indent: 1,
-      listStyleType: type,
-    }),
-    {
-      at: entry[1],
-    }
-  );
-};
-
-const setBlockMap: Record<
-  string,
-  (editor: PlateEditor, type: string, entry: NodeEntry<TElement>) => void
-> = {
-  [KEYS.ul]: setList,
-  [KEYS.ol]: setList,
-};
+const isInClassicList = (editor: PlateEditor) =>
+  !!editor.api.some({ match: { type: [KEYS.ulClassic, KEYS.olClassic] } });
 
 export const setBlockType = (
   editor: PlateEditor,
   type: string,
   { at }: { at?: Path } = {}
 ) => {
+  if (at) editor.tf.select(at);
+
+  const listType = CLASSIC_LIST[type] ?? (type in MENU_VALUE ? type : undefined);
+  if (listType) {
+    toggleList(editor, { type: listType });
+    return;
+  }
+
   editor.tf.withoutNormalizing(() => {
-    const setEntry = (entry: NodeEntry<TElement>) => {
-      const [node, path] = entry;
-
-      // Clear list properties if changing away from list
-      if (node[KEYS.listType]) {
-        editor.tf.unsetNodes([KEYS.listType, 'indent'], { at: path });
-      }
-      
-      if (type in setBlockMap) {
-        return setBlockMap[type](editor, type, entry);
-      }
-      
-      if (node.type !== type) {
-        editor.tf.setNodes({ type }, { at: path });
-      }
-    };
-
-    if (at) {
-      const entry = editor.api.node<TElement>(at);
-
-      if (entry) {
-        setEntry(entry);
-        return;
-      }
-    }
-
-    const entries = editor.api.blocks({ mode: 'lowest' });
-
-    entries.forEach((entry) => {
-      setEntry(entry);
-    });
+    if (isInClassicList(editor)) unwrapList(editor);
+    editor.tf.setNodes({ type }, { match: (n) => editor.api.isBlock(n) && n.type !== type, mode: 'lowest' });
   });
 };
 
-export const getBlockType = (block: TElement) => {
-  if (block[KEYS.listType]) {
-    if (block[KEYS.listType] === KEYS.ol) {
-      return KEYS.ol;
-    }
-    return KEYS.ul;
-  }
+export const getBlockType = (block: TElement) => MENU_VALUE[block.type] ?? block.type;
 
-  return block.type;
-};
+/** Links may only point to web pages or email addresses. */
+export const isSafeLinkUrl = (url: string) => /^(https?:\/\/|mailto:)\S/i.test(url.trim());
