@@ -5,6 +5,7 @@ import {
   effectiveTier,
   guideLimit,
   isPaidTier,
+  isUnlocked,
   normalizeTier,
 } from "./tiers"
 
@@ -64,5 +65,20 @@ describe("limits", () => {
     expect(isPaidTier("starter")).toBe(false)
     expect(isPaidTier("pro")).toBe(true)
     expect(isPaidTier("agency")).toBe(true)
+  })
+})
+
+describe("isUnlocked", () => {
+  it.each([
+    ["starter", undefined, true],
+    ["starter", "starter", true],
+    ["starter", "pro", false],
+    ["starter", "agency", false],
+    ["pro", "pro", true],
+    ["pro", "agency", false],
+    ["agency", "pro", true],
+    ["agency", "agency", true],
+  ] as const)("tier %s, section minTier %s -> %s", (tier, minTier, expected) => {
+    expect(isUnlocked(tier, minTier)).toBe(expected)
   })
 })

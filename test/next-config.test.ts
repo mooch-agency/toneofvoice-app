@@ -20,3 +20,17 @@ describe("next.config", () => {
     expect(nextConfig.typescript?.ignoreBuildErrors ?? false).toBe(false)
   })
 })
+
+describe("redirects for removed pages", () => {
+  it.each([
+    ["/payment/success", "/dashboard"],
+    ["/payment/cancel", "/dashboard/billing"],
+    ["/preview", "/guide"],
+    ["/full-access", "/guide"],
+    ["/demo", "/example"],
+    ["/brand-details", "/"],
+  ])("%s -> %s", async (source, destination) => {
+    const redirects = (await nextConfig.redirects?.()) ?? []
+    expect(redirects).toContainEqual(expect.objectContaining({ source, destination }))
+  })
+})

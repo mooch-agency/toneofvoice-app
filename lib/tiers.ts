@@ -59,3 +59,10 @@ export function guideLimit(tier: Tier): number {
 export function canCreateGuide(tier: Tier, used: number): boolean {
   return used < guideLimit(tier)
 }
+
+const TIER_RANK: Record<Tier, number> = { starter: 0, pro: 1, agency: 2 }
+
+/** Whether a user on `tier` can see content gated at `minTier` (default: open to all). */
+export function isUnlocked(tier: Tier, minTier?: Tier): boolean {
+  return TIER_RANK[tier] >= TIER_RANK[minTier ?? "starter"]
+}
