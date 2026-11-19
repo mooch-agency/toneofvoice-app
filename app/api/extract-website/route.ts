@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server"
 import { generateWithOpenAI, generateAudienceSummary, generateKeywords, generateTraitSuggestions } from "@/lib/openai"
 import Logger from "@/lib/logger"
-import { validateUrl } from "@/lib/url-validation"
+import { normalizeUrlInput, parsePublicHttpUrl } from "@/lib/url-validation"
 import { fetchAndExtractWithCheerio } from "@/lib/cheerio-site-scraper"
 
 // Define interfaces for brand details
@@ -213,20 +213,16 @@ export async function POST(request: Request) {
       }
     }
 
-    // Sanitize and validate the URL
-    let cleanUrl = body.url.trim().replace(/^['"\s]+|['"\s]+$/g, "")
-    if (!/^https?:\/\//i.test(cleanUrl)) {
-      cleanUrl = "https://" + cleanUrl
-    }
-    // Validate again after cleaning
-    const urlValidation = validateUrl(cleanUrl)
-    if (!urlValidation.isValid) {
-      Logger.error("Invalid URL provided after cleaning", new Error(urlValidation.error))
+    // Sanitize and validate the URL (DNS and redirect checks happen in the scraper)
+    let urlValidation: { url: string }
+    try {
+      urlValidation = { url: parsePublicHttpUrl(normalizeUrlInput(String(body.url))).toString() }
+    } catch {
       return NextResponse.json(
         {
           success: false,
           message: "Invalid URL provided. Please check for typos or extra punctuation.",
-          error: urlValidation.error,
+          error: "Invalid URL",
         },
         { status: 400 }
       )
