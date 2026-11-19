@@ -52,14 +52,12 @@ import { MarkToolbarButton } from "@/components/ui/mark-toolbar-button";
 import { AIToolbarButton } from "@/components/ui/ai-toolbar-button";
 import { UndoToolbarButton, RedoToolbarButton } from "@/components/ui/history-toolbar-button";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
 // UI node components — see DESIGN_SYSTEM.md
 import { H1Element, H2Element, H2SectionElement, H3Element } from "@/components/ui/heading-node";
 import { BlockquoteElement } from "@/components/ui/blockquote-node";
 import { HrElement } from "@/components/ui/hr-node";
-import { ParagraphElement } from "@/components/ui/paragraph-node";
 import { CodeLeaf } from "@/components/ui/code-node";
 import {
   BulletedListElement,
