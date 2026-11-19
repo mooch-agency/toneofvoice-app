@@ -1,258 +1,197 @@
-import { OpenAI } from "openai"
+import type { ChatCompletion, ChatCompletionCreateParamsNonStreaming } from "openai/resources/chat/completions"
 import Logger from "./logger"
-import { TRAITS, type MixedTrait, type TraitName, isPredefinedTrait, isCustomTrait } from "./traits"
-import { createTracedOpenAI } from "./langsmith-openai"
+import { getOpenAIClient } from "./langsmith-openai"
+import { parseJsonResponse, stripOuterFence } from "./llm-json"
+import { formatTraitMarkdown, normalizeMarkdown } from "./markdown-format"
+import { getAllowedCategoriesPromptText, validateRules } from "./rules-schema"
+import { renderRulesMarkdown } from "./rules-renderer"
+import { TRAIT_NAMES, parseTraitSuggestions, traitNames } from "./traits"
 
-interface GenerationResult {
+export interface GenerationResult {
   success: boolean
   content?: string
   error?: string
 }
 
-type ResponseFormat = "json" | "markdown"
+export type ResponseFormat = "json" | "markdown"
+export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh"
 
-async function validateJsonResponse(text: string): Promise<{ isValid: boolean; content?: any; error?: string }> {
-  // No validation - just pass through the raw JSON
-  return {
-    isValid: true,
-    content: text
+export interface GenerateOptions {
+  /** Deadline shared by all calls of one request. */
+  signal?: AbortSignal
+}
+
+/** Brand fields the section prompts read. Extra fields are ignored. */
+export interface BrandPromptDetails {
+  name?: string
+  brandDetailsDescription?: string
+  audience?: string
+  traits?: unknown
+  keywords?: unknown
+  productsServices?: unknown
+  formalityLevel?: string
+  readingLevel?: string
+  englishVariant?: string
+}
+
+const DEFAULT_MODEL = "gpt-5.2"
+const NO_EM_DASH = "IMPORTANT: Never use em dashes (—) in your output. Use hyphens (-) or rewrite sentences instead."
+
+// ---------------------------------------------------------------------------
+// Core completion: one shared client, JSON mode, truncation check and a single
+// content-validation retry. Transport retries (429/5xx/timeouts) are left to
+// the SDK, which backs off (see langsmith-openai.ts).
+// ---------------------------------------------------------------------------
+
+type Checked = { ok: true; content: string } | { ok: false; error: string }
+type Check = (raw: string) => Checked
+
+interface CompletionSpec {
+  prompt: string
+  system: string
+  format: ResponseFormat
+  maxTokens: number
+  model?: string
+  effort?: ReasoningEffort
+  /** Validate and transform the raw text. A failed check triggers the one retry. */
+  check?: Check
+  signal?: AbortSignal
+}
+
+const MAX_ATTEMPTS = 2
+
+function buildRequest(spec: CompletionSpec, maxTokens: number): ChatCompletionCreateParamsNonStreaming {
+  const model = spec.model ?? DEFAULT_MODEL
+  const request: Record<string, unknown> = {
+    model,
+    messages: [
+      { role: "system", content: spec.system },
+      { role: "user", content: spec.prompt },
+    ],
+  }
+  if (model.startsWith("gpt-5")) {
+    request.max_completion_tokens = maxTokens
+    request.reasoning_effort = spec.effort ?? "medium"
+  } else {
+    request.max_tokens = maxTokens
+    request.temperature = 0.4
+  }
+  if (spec.format === "json") request.response_format = { type: "json_object" }
+  return request as unknown as ChatCompletionCreateParamsNonStreaming
+}
+
+const checkMarkdown: Check = (raw) => {
+  const content = stripOuterFence(raw).normalize("NFC")
+  return content ? { ok: true, content } : { ok: false, error: "Empty response" }
+}
+
+/** JSON check: parse, then let `toContent` validate the shape (null = invalid). */
+function jsonCheck(toContent: (value: unknown) => string | null): Check {
+  return (raw) => {
+    const parsed = parseJsonResponse(raw)
+    if (!parsed.ok) return parsed
+    const content = toContent(parsed.value)
+    return content ? { ok: true, content } : { ok: false, error: "Response JSON had the wrong shape" }
   }
 }
 
-async function validateMarkdownResponse(text: string): Promise<{ isValid: boolean; content?: string; error?: string }> {
-  try {
-    // Basic validation - ensure text is not empty and contains valid UTF-8
-    if (!text || text.trim().length === 0) {
-      return {
-        isValid: false,
-        error: "Empty or whitespace-only response"
-      }
-    }
-    
-    // Normalize Unicode characters to ensure consistent encoding
-    const normalized = text.normalize('NFC')
-    
-    return {
-      isValid: true,
-      content: normalized
-    }
-  } catch (error) {
-    return {
-      isValid: false,
-      error: error instanceof Error ? error.message : "Invalid text format"
-    }
-  }
-}
+const checkAnyJson = jsonCheck((value) => JSON.stringify(value))
 
-async function cleanResponse(text: string, format: ResponseFormat): Promise<string> {
-  // Remove any markdown code block syntax if it exists
-  text = text.replace(/```(json|markdown)\n?/g, "").replace(/```\n?/g, "")
-  
-  // Remove any leading/trailing whitespace
-  text = text.trim()
+async function complete(spec: CompletionSpec): Promise<GenerationResult> {
+  const check = spec.check ?? (spec.format === "json" ? checkAnyJson : checkMarkdown)
+  const model = spec.model ?? DEFAULT_MODEL
+  let budget = spec.maxTokens
+  let lastError = "No response"
 
-  // For JSON responses, try to extract JSON if wrapped in markdown
-  if (format === "json") {
-    // Try to parse and re-stringify to clean up any trailing text
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    if (spec.signal?.aborted) return { success: false, error: "Generation was cancelled" }
+
+    let response: ChatCompletion
     try {
-      // Find the start of JSON (either [ or {)
-      const jsonStart = Math.min(
-        text.indexOf('[') >= 0 ? text.indexOf('[') : Infinity,
-        text.indexOf('{') >= 0 ? text.indexOf('{') : Infinity
-      )
-      
-      if (jsonStart < Infinity) {
-        // Try to parse from this point
-        let jsonText = text.substring(jsonStart)
-        
-        // Try to find valid JSON by attempting to parse progressively smaller substrings
-        let foundValid = false
-        for (let i = jsonText.length; i > 0; i--) {
-          try {
-            const candidate = jsonText.substring(0, i)
-            const parsed = JSON.parse(candidate)
-            // If parse succeeds, re-stringify to clean format
-            const cleaned = JSON.stringify(parsed)
-            text = cleaned
-            foundValid = true
-            break
-          } catch (e) {
-            // Continue trying shorter substrings
-          }
-        }
-        
-        // If we couldn't find valid JSON, fall back to original text
-        if (!foundValid) {
-          text = jsonText
-        }
-      }
-    } catch (e) {
-      // If all else fails, try the old regex approach
-      const arrayMatch = text.match(/\[[\s\S]*\]/)
-      const objectMatch = text.match(/\{[\s\S]*\}/)
-      
-      if (arrayMatch) {
-        text = arrayMatch[0]
-      } else if (objectMatch) {
-        text = objectMatch[0]
-      }
+      response = await getOpenAIClient().chat.completions.create(buildRequest(spec, budget), { signal: spec.signal })
+    } catch (error) {
+      Logger.error("OpenAI request failed", error, { model })
+      return { success: false, error: error instanceof Error ? error.message : "OpenAI request failed" }
     }
+
+    const choice = response.choices?.[0]
+    Logger.debug("OpenAI usage", { model, attempt, usage: response.usage, finish: choice?.finish_reason })
+
+    if (choice?.finish_reason === "length") {
+      lastError = "Response was cut off (token limit)"
+      budget *= 2
+    } else {
+      const result = check(choice?.message?.content ?? "")
+      if (result.ok) return { success: true, content: result.content }
+      lastError = result.error
+    }
+    Logger.warn("OpenAI response rejected", { model, attempt, reason: lastError })
   }
-  
-  return text
+
+  Logger.error("OpenAI generation failed", undefined, { model, reason: lastError })
+  return { success: false, error: lastError }
 }
 
+/** Generic completion (used by extract-website). JSON responses come back as normalised JSON text. */
 export async function generateWithOpenAI(
-  prompt: string, 
+  prompt: string,
   systemPrompt: string,
   responseFormat: ResponseFormat = "json",
-  max_tokens: number = 2000,
-  model: string = "gpt-5.2", // Default to GPT-5.2 with reasoning
-  reasoningEffort: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" = "medium"
+  maxTokens: number = 2000,
+  model: string = DEFAULT_MODEL,
+  reasoningEffort: ReasoningEffort = "medium",
+  opts: GenerateOptions = {},
 ): Promise<GenerationResult> {
-  const maxAttempts = 3
-  Logger.info("Starting OpenAI generation", { prompt: prompt.substring(0, 100) + "...", format: responseFormat, model, reasoningEffort })
-  Logger.debug("Full prompt", { prompt })
-
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      Logger.debug(`OpenAI attempt ${attempt}/${maxAttempts}`)
-
-      const openai = createTracedOpenAI()
-      const requestParams: any = {
-        model: model,
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: prompt }
-        ],
-      }
-      
-      // GPT-5+ uses max_completion_tokens + reasoning_effort; older models use max_tokens + temperature
-      if (model === "gpt-5.2" || model.startsWith("gpt-5")) {
-        requestParams.max_completion_tokens = max_tokens
-        requestParams.reasoning_effort = reasoningEffort
-      } else {
-        requestParams.max_tokens = max_tokens
-        requestParams.temperature = 0.4
-      }
-      
-      const response = await openai.chat.completions.create(requestParams)
-
-      const rawResponse = response.choices[0]?.message?.content
-      if (!rawResponse) {
-        throw new Error("Empty response from OpenAI")
-      }
-
-      Logger.debug("Raw OpenAI response", { response: rawResponse })
-
-      // Log token usage information
-      if (response.usage) {
-        console.log("=".repeat(50))
-        console.log("🔢 TOKEN USAGE SUMMARY")
-        console.log("=".repeat(50))
-        console.log(`Model: ${response.model}`)
-        console.log(`Prompt tokens: ${response.usage.prompt_tokens}`)
-        console.log(`Completion tokens: ${response.usage.completion_tokens}`) 
-        console.log(`Total tokens: ${response.usage.total_tokens}`)
-        console.log(`Max tokens requested: ${max_tokens}`)
-        console.log("=".repeat(50))
-      }
-
-      // Clean the response based on expected format
-      const cleanedResponse = await cleanResponse(rawResponse, responseFormat)
-      Logger.debug("Cleaned response", { response: cleanedResponse })
-
-      // Skip validation - just return the cleaned response
-      Logger.info("OpenAI generation successful", { length: cleanedResponse.length, format: responseFormat })
-      return {
-        success: true,
-        content: cleanedResponse
-      }
-
-    } catch (error) {
-      if (attempt === maxAttempts) {
-        Logger.error(
-          "OpenAI generation failed",
-          error instanceof Error ? error : new Error("Unknown error"),
-          { attempt }
-        )
-        return {
-          success: false,
-          error: error instanceof Error ? error.message : "Failed to generate content"
-        }
-      }
-      Logger.warn("OpenAI generation attempt failed, retrying", {
-        attempt,
-        error: error instanceof Error ? error.message : "Unknown error"
-      })
-    }
-  }
-
-  // This should never be reached due to the error handling above
-  return {
-    success: false,
-    error: "Unexpected error in generation"
-  }
+  return complete({
+    prompt,
+    system: systemPrompt,
+    format: responseFormat,
+    maxTokens,
+    model,
+    effort: reasoningEffort,
+    signal: opts.signal,
+  })
 }
 
-// Helper function to convert predefined trait to markdown format
-function predefinedTraitToMarkdown(traitName: TraitName, index: number): string {
-  const trait = TRAITS[traitName]
-  
-  return `### ${index}. ${traitName}
+// ---------------------------------------------------------------------------
+// Prompt helpers
+// ---------------------------------------------------------------------------
 
-${trait.definition}
-
-***What It Means***
-
-${trait.do.map(item => `→ ${item}`).join('\n')}
-
-***What It Doesn't Mean***
-
-${trait.dont.map(item => `✗ ${item}`).join('\n')}`
+function stringList(value: unknown, max: number): string[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .filter((v): v is string => typeof v === "string")
+    .map((v) => v.trim())
+    .filter(Boolean)
+    .slice(0, max)
 }
 
-// Function to generate custom trait description via AI (used by preview which needs 1 trait)
-async function generateCustomTraitDescription(traitName: string, brandDetails: any, index: number): Promise<string> {
-  const genResult = await generateAllTraitsInOneCall(brandDetails, [traitName]);
-  if (genResult.success && genResult.content) return genResult.content.trim();
-  console.error("[generateCustomTraitDescription] Failed for", traitName, genResult.error);
-  return `### ${index}. ${traitName}
-
-This trait should be tailored specifically to ${brandDetails.name} and their ${brandDetails.audience || "target audience"}.
-
-***What It Means***
-
-→ Use clear, professional language appropriate for your audience
-→ Maintain consistent tone and style across all communications
-→ Structure content logically for easy comprehension
-
-***What It Doesn't Mean***
-
-✗ Using generic examples that don't reflect your brand's uniqueness
-✗ Applying this trait without considering your audience's expectations
-✗ Taking this trait to extremes that don't align with your brand context`;
+function listLine(prefix: string, value: unknown, max: number): string {
+  const items = stringList(value, max)
+  return items.length ? `${prefix}${items.join(", ")}` : ""
 }
 
-// Generate all trait descriptions in a single API call
-async function generateAllTraitsInOneCall(brandDetails: any, traitNames: string[]): Promise<GenerationResult> {
-  const keywordSection = Array.isArray(brandDetails.keywords) && brandDetails.keywords.length
-    ? `\n• Keywords: ${brandDetails.keywords.slice(0, 25).join(', ')}`
-    : '';
-  const productsServicesSection = Array.isArray(brandDetails.productsServices) && brandDetails.productsServices.length
-    ? `\n• Products/Services: ${brandDetails.productsServices.slice(0, 12).join(', ')}`
-    : '';
-  const traitsList = traitNames.map((t, i) => `${i + 1}. ${t}`).join('\n');
+// ---------------------------------------------------------------------------
+// Guide sections
+// ---------------------------------------------------------------------------
+
+/** Brand Voice: every selected trait in one call, formatted markdown. */
+export async function generateBrandVoiceTraits(
+  brandDetails: BrandPromptDetails,
+  opts: GenerateOptions = {},
+): Promise<GenerationResult> {
+  const names = traitNames(brandDetails.traits)
+  if (names.length === 0) return { success: false, error: "No traits selected for this brand" }
 
   const prompt = `You are a brand voice expert. Generate communication style guidelines for the following traits based on this brand information.
 
 Brand Info:
 • Brand Name: ${brandDetails.name}
 • What they do: ${brandDetails.brandDetailsDescription}
-• Audience: ${brandDetails.audience}${keywordSection}${productsServicesSection}
+• Audience: ${brandDetails.audience}${listLine("\n• Keywords: ", brandDetails.keywords, 25)}${listLine("\n• Products/Services: ", brandDetails.productsServices, 12)}
 
-Traits to generate (${traitNames.length} total):
-${traitsList}
+Traits to generate (${names.length} total):
+${names.map((t, i) => `${i + 1}. ${t}`).join("\n")}
 
 For EACH trait, create a description in this EXACT format. Use the exact heading level and structure:
 
@@ -277,304 +216,36 @@ Important constraints for the ONE SENTENCE (3 rules):
 ✗ [How the second instruction could be taken too far]
 ✗ [How the third instruction could be taken too far]
 
-IMPORTANT: Never use em dashes (—) in your output. Use hyphens (-) or rewrite sentences instead.
+${NO_EM_DASH}
 
-Repeat this block for each trait (### 2. [TraitName], ### 3. [TraitName], etc.). Each "What It Doesn't Mean" should show how its corresponding "What It Means" could be taken too far. Use → (unicode arrow) and ✗ (unicode cross) exactly as shown.`;
+Repeat this block for each trait (### 2. [TraitName], ### 3. [TraitName], etc.). Each "What It Doesn't Mean" should show how its corresponding "What It Means" could be taken too far. Use → (unicode arrow) and ✗ (unicode cross) exactly as shown.`
 
-  const result = await generateWithOpenAI(
+  return complete({
     prompt,
-    "You are a brand voice expert creating specific, actionable communication style guidelines.",
-    "markdown", 2500, "gpt-5.2", "low"
-  );
-
-  if (result.success && result.content) {
-    return { success: true, content: result.content.trim() };
-  }
-  return { success: false, error: result.error || "Failed to generate traits" };
+    system: "You are a brand voice expert creating specific, actionable communication style guidelines.",
+    format: "markdown",
+    maxTokens: 2500,
+    effort: "low",
+    check: (raw) => {
+      const content = formatTraitMarkdown(stripOuterFence(raw).normalize("NFC"))
+      return content ? { ok: true, content } : { ok: false, error: "Empty response" }
+    },
+    signal: opts.signal,
+  })
 }
 
-// Main function to generate brand voice traits (single API call for all traits)
-export async function generateBrandVoiceTraits(brandDetails: any): Promise<GenerationResult> {
-  try {
-    if (!brandDetails.traits || !Array.isArray(brandDetails.traits) || brandDetails.traits.length === 0) {
-      return { success: false, error: "No traits selected for this brand" };
-    }
-
-    const traitNames = brandDetails.traits
-      .map((t: any) => (typeof t === 'string' ? t : t?.name))
-      .filter(Boolean);
-    if (traitNames.length === 0) {
-      return { success: false, error: "No valid traits found" };
-    }
-
-    console.log(`[generateBrandVoiceTraits] Generating ${traitNames.length} traits in one call:`, traitNames);
-
-    const result = await generateAllTraitsInOneCall(brandDetails, traitNames);
-
-    if (result.success && result.content) {
-      console.log(`[generateBrandVoiceTraits] Generated ${traitNames.length} traits successfully`);
-      return { success: true, content: result.content };
-    }
-
-    return { success: false, error: result.error || "Failed to generate traits" };
-  } catch (error) {
-    console.error("[generateBrandVoiceTraits] Error:", error);
-    return { success: false, error: error instanceof Error ? error.message : "Unknown error generating brand voice traits" };
-  }
-}
-
-// Generate brand voice traits with preview limits (for preview page)
-export async function generateBrandVoiceTraitsPreview(
-  brandDetails: any,
-  fullCount: number = 1,
-  nameCount: number = 2
+/** Audience: overview, primary and secondary audience. Markdown with ### headings. */
+export async function generateAudienceSection(
+  brandDetails: BrandPromptDetails,
+  opts: GenerateOptions = {},
 ): Promise<GenerationResult> {
-  try {
-    if (!brandDetails.traits || !Array.isArray(brandDetails.traits) || brandDetails.traits.length === 0) {
-      return { success: false, error: "No traits selected for this brand" }
-    }
-
-    const totalNeeded = Math.min(fullCount + nameCount, brandDetails.traits.length)
-    const availableTraits = brandDetails.traits.slice(0, totalNeeded)
-
-    // Generate full descriptions for first N traits
-    const fullTraitPromises = availableTraits.slice(0, fullCount).map((trait: any, i: number) => {
-      const index = i + 1
-      const traitName = typeof trait === 'string' ? trait : trait?.name
-      return generateCustomTraitDescription(traitName, brandDetails, index)
-    })
-
-    const results = await Promise.allSettled(fullTraitPromises)
-    const fullTraits: string[] = []
-    results.forEach(r => { if (r.status === 'fulfilled' && r.value) fullTraits.push(r.value) })
-
-    const nameOnlyTraits: string[] = availableTraits.slice(fullCount, totalNeeded).map((t: any) => (typeof t === 'string' ? t : t?.name)).filter(Boolean)
-
-    const payload = { fullTraits, nameOnlyTraits }
-    return { success: true, content: JSON.stringify(payload) }
-  } catch (error) {
-    console.error("Error in generateBrandVoiceTraitsPreview:", error)
-    return { success: false, error: error instanceof Error ? error.message : 'Unknown error' }
-  }
-}
-
-// Generate before/after examples (5 content types, 1-2 sentences each)
-export async function generateBeforeAfterSamples(brandDetails: any, traitsContext?: string): Promise<GenerationResult> {
-  try {
-    const productsServicesSection =
-      Array.isArray(brandDetails.productsServices) && brandDetails.productsServices.length
-        ? `\nProducts/Services: ${brandDetails.productsServices.slice(0, 15).join(", ")}`
-        : "";
-    const prompt = `Create exactly 5 "Before → After" content transformation examples for ${brandDetails.name}. Each tied to a content type.
-
-Brand: ${brandDetails.name}
-Description: ${brandDetails.brandDetailsDescription}
-Audience: ${brandDetails.audience}${productsServicesSection}
-${traitsContext ? `Traits: ${traitsContext.slice(0, 800)}` : ""}
-
-Content types (one example each):
-1. Homepage headline
-2. Email subject line
-3. Social media post
-4. Error or empty state message
-5. Blog intro paragraph
-
-For each: "Before" = plausible generic copy (not absurdly bad). "After" = on-brand, demonstrates voice. 1-2 sentences each.
-
-IMPORTANT: Never use em dashes (—) in your output. Use hyphens (-) or rewrite sentences instead.
-
-Return JSON:
-{"examples":[{"contentType":"Homepage Headline","before":"...","after":"..."}, ...]}`;
-
-    const result = await generateWithOpenAI(
-      prompt,
-      "You are an expert copywriter who transforms generic content into distinctive brand voice. Return strict JSON only. Never use em dashes.",
-      "json",
-      800,
-      "gpt-5.2",
-      "low"
-    );
-
-    if (!result.success || !result.content) {
-      return { success: false, error: result.error || "Failed to generate before/after samples" };
-    }
-
-    try {
-      const parsed = JSON.parse(result.content);
-      const examples = Array.isArray(parsed?.examples) ? parsed.examples : [];
-      const contentTypes = [
-        "Homepage Headline",
-        "Email Subject Line",
-        "Social Media Post",
-        "Error or Empty State Message",
-        "Blog Intro Paragraph",
-      ];
-      const markdown = examples
-        .slice(0, 5)
-        .map((ex: any, i: number) => {
-          const ct = ex.contentType || contentTypes[i] || `Example ${i + 1}`;
-          return `### ${ct}\n\n**Before:** ${ex.before || ""}\n\n**After:** ${ex.after || ""}`;
-        })
-        .join("\n\n");
-      return { success: true, content: markdown };
-    } catch (e) {
-      return { success: false, error: "Invalid before/after JSON response" };
-    }
-  } catch (error) {
-    console.error("Error in generateBeforeAfterSamples:", error);
-    return { success: false, error: error instanceof Error ? error.message : "Unknown error" };
-  }
-}
-
-/* Function to generate style guide rules
-export async function generateStyleGuideRules(brandDetails: any, section: string): Promise<GenerationResult> {
-  const prompt = `Create style guide rules for ${brandDetails.name}'s ${section} section.
-  
-Brand Description: ${brandDetails.brandDetailsDescription}
-Target Audience: ${brandDetails.audience}
-
-Consider how ${brandDetails.audience} will interact with the content. Rules should help content creators effectively communicate with this audience.
-
-Provide 1 specific rule in this EXACT format:
-
-[rule description]
-✅ Right: [clear example that follows the rule]
-❌ Wrong: [example that breaks the rule]
-
-Each rule must:
-1. Start with the rule name
-2. Include a Right example with '✅ Right:'
-3. Include a Wrong example with '❌ Wrong:'
-4. Use markdown formatting for emphasis
-5. Be specific and actionable
-
-Provide exactly ONE rule for each section, not a list. Do NOT include more than one rule. Only output one rule block in the format below.
-
-Example format:
-
-Use active voice
-✅ The team completed the project on time
-❌ The project was completed by the team
-
-Use British English spelling
-✅ Colour
-❌ Color`
-
-  return generateWithOpenAI(prompt, "You are an expert content strategist who creates clear, actionable style guide rules.", "markdown")
-}*/
-
-// Generate exactly 25 style rules (one per canonical category)
-export async function generateStyleRules(brandDetails: any, traitsContext?: string): Promise<GenerationResult> {
-  console.log("[generateStyleRules] Generating 25 rules for:", brandDetails?.name);
-
-  try {
-    const rulesSchema = await import("./rules-schema");
-    const { getAllowedCategoriesPromptText, validateRules } = rulesSchema;
-    const { renderRulesMarkdown } = await import("./rules-renderer");
-
-    const traitsSection = traitsContext ? `\nTraits Context:\n${traitsContext}\n` : "";
-    const allowedCategories = getAllowedCategoriesPromptText();
-    const keywordSection =
-      Array.isArray(brandDetails.keywords) && brandDetails.keywords.length
-        ? `\nKeywords: ${brandDetails.keywords.slice(0, 25).join(", ")}`
-        : "";
-    const productsServicesSection =
-      Array.isArray(brandDetails.productsServices) && brandDetails.productsServices.length
-        ? `\nProducts/Services: ${brandDetails.productsServices.slice(0, 12).join(", ")}`
-        : "";
-    const traitNames = Array.isArray(brandDetails.traits)
-      ? brandDetails.traits.map((t: any) => (typeof t === "string" ? t : t?.name)).filter(Boolean)
-      : [];
-
-    const prompt = `Create exactly 25 writing style rules for this brand. Use ONE rule per category from the list below. Rules support brand voice traits.
-
-Brand:
-- Name: ${brandDetails.name}
-- Audience: ${brandDetails.audience}
-- Description: ${brandDetails.brandDetailsDescription}
-- Formality: ${brandDetails.formalityLevel || "Neutral"}
-- Reading Level: ${brandDetails.readingLevel || "10-12"}
-- English Variant: ${brandDetails.englishVariant || "american"}${keywordSection}${productsServicesSection}
-${traitNames.length ? `- Selected Traits: ${traitNames.join(", ")}` : ""}
-${traitsSection}
-
-Allowed categories (use each exactly once, in this order):
-${allowedCategories}
-
-Return STRICT JSON array:
-[{"category": "Category Name", "title": "Category Name", "description": "One sentence rule 8-12 words", "examples": {"good": "Example", "bad": "Example"}}]
-
-Requirements:
-- Write rule descriptions naturally. Most should include why the rule matters, but use varied sentence structures to avoid monotony: "Use contractions to sound conversational and warm." or "Stick with British spelling throughout." or "Keep sentences under 20 words—shorter sentences are easier to scan." or "Multiple exclamation marks feel jarring and lose impact."
-- Break monotony by using different sentence patterns: some with "to" connectors, some with periods separating the action from the benefit, some as observations. Vary opening words and structure.
-- Pick the single trait that best fits each rule; vary which traits you use across rules.
-- Examples must sound like ${brandDetails.name} speaking to ${brandDetails.audience}
-- Description 8-12 words max
-- Exactly 25 rules, one per category
-- Format times without extra spaces (e.g. "10:00 am" not "10: 00 am")
-- Use a space before quoted text (e.g. "Click \"Mark as duplicate\"" not "Click\"Mark as duplicate\"")
-- In the Emojis rule, do NOT use emoji characters in examples; use plain text only (avoids encoding artifacts)
-- IMPORTANT: Never use em dashes (—) anywhere in your output. Use hyphens (-) or rewrite sentences instead.`;
-
-    let attempts = 0;
-    const maxAttempts = 3;
-
-    while (attempts < maxAttempts) {
-      attempts++;
-      const result = await generateWithOpenAI(
-        prompt,
-        "You are a tone of voice guide expert. Return strict JSON array only.",
-        "json",
-        3000,
-        "gpt-5.2",
-        "none"
-      );
-
-      if (!result.success || !result.content) {
-        if (attempts === maxAttempts) {
-          return { success: false, error: result.error || "Failed after retries" };
-        }
-        continue;
-      }
-
-      try {
-        const parsed = JSON.parse(result.content);
-        const rules = Array.isArray(parsed) ? parsed : [parsed];
-        const validation = validateRules(rules);
-        if (validation.valid.length >= 20) {
-          const markdown = renderRulesMarkdown(validation.valid.slice(0, 25));
-          return { success: true, content: markdown };
-        }
-      } catch (e) {
-        console.error("[generateStyleRules] Parse/validation failed:", e);
-      }
-    }
-    return { success: false, error: "Failed to generate valid rules after retries" };
-  } catch (error) {
-    console.error("[generateStyleRules] Error:", error);
-    return { success: false, error: error instanceof Error ? error.message : "Unknown error" };
-  }
-}
-
-
-// Audience section: overview + primary (goals/motivations) + secondary (brief). No writing advice.
-export async function generateAudienceSection(brandDetails: any): Promise<GenerationResult> {
-  const keywordsLine =
-    Array.isArray(brandDetails.keywords) && brandDetails.keywords.length
-      ? brandDetails.keywords.slice(0, 25).join(", ")
-      : "";
-  const productsLine =
-    Array.isArray(brandDetails.productsServices) && brandDetails.productsServices.length
-      ? brandDetails.productsServices.slice(0, 15).join(", ")
-      : "";
-
   const prompt = `Write an Audience section for the brand below.
 
 Brand: ${brandDetails.name}
 What they do: ${brandDetails.brandDetailsDescription}
 Audience hint: ${brandDetails.audience || "general audience"}
-Keywords (optional): ${keywordsLine}
-Products/services (optional): ${productsLine}
+Keywords (optional): ${stringList(brandDetails.keywords, 25).join(", ")}
+Products/services (optional): ${stringList(brandDetails.productsServices, 15).join(", ")}
 
 Output markdown only, with these headings exactly:
 ### Overview
@@ -594,85 +265,179 @@ Detail rules:
 - Describe who they are and their context/mindset (goals, motivations, anxieties).
 - Do not include writing advice or tone guidance.
 - Be specific but don't invent facts. If unsure, use "often" or "typically."
-- Never use em dashes (—). Use hyphens (-) or rewrite.`;
+- Never use em dashes (—). Use hyphens (-) or rewrite.`
 
-  return generateWithOpenAI(
+  return complete({
     prompt,
-    "You write precise, brand-specific audience sections for tone of voice guidelines.",
-    "markdown",
-    450,
-    "gpt-5.2",
-    "low"
-  );
+    system: "You write precise, brand-specific audience sections for tone of voice guidelines.",
+    format: "markdown",
+    maxTokens: 800,
+    effort: "low",
+    check: (raw) => {
+      const content = normalizeMarkdown(stripOuterFence(raw).normalize("NFC"))
+      return content ? { ok: true, content } : { ok: false, error: "Empty response" }
+    },
+    signal: opts.signal,
+  })
 }
 
-// Content guidelines: short-form, long-form, product/UX copy
-export async function generateContentGuidelines(brandDetails: any, traitsContext?: string): Promise<GenerationResult> {
-  const traitsSection = traitsContext ? `\nTraits: ${traitsContext.slice(0, 600)}\n` : "";
-  const prompt = `Write brand-specific Content Guidelines (markdown) with 3 subsections. Each has 3-4 bullets derived from the brand's traits and audience. No generic platitudes.
+/** Style Rules: 25 rules, one per canonical category, rendered to final markdown. */
+export async function generateStyleRules(
+  brandDetails: BrandPromptDetails,
+  traitsContext?: string,
+  opts: GenerateOptions = {},
+): Promise<GenerationResult> {
+  const names = traitNames(brandDetails.traits)
+  const prompt = `Create exactly 25 writing style rules for this brand. Use ONE rule per category from the list below. Rules support brand voice traits.
 
-### Short-form
-_social, ads, subject lines_
-- 3-4 bullets tailored to this brand
+Brand:
+- Name: ${brandDetails.name}
+- Audience: ${brandDetails.audience}
+- Description: ${brandDetails.brandDetailsDescription}
+- Formality: ${brandDetails.formalityLevel || "Neutral"}
+- Reading Level: ${brandDetails.readingLevel || "10-12"}
+- English Variant: ${brandDetails.englishVariant || "american"}${listLine("\nKeywords: ", brandDetails.keywords, 25)}${listLine("\nProducts/Services: ", brandDetails.productsServices, 12)}
+${names.length ? `- Selected Traits: ${names.join(", ")}` : ""}
+${traitsContext ? `\nTraits Context:\n${traitsContext}\n` : ""}
 
-### Long-form
-_blogs, newsletters, case studies_
-- 3-4 bullets tailored to this brand
+Allowed categories (use each exactly once, in this order):
+${getAllowedCategoriesPromptText()}
 
-### Product and UX copy
-_buttons, errors, onboarding_
-- 3-4 bullets tailored to this brand
+Return a STRICT JSON object:
+{"rules": [{"category": "Category Name", "title": "Category Name", "description": "One sentence rule 8-12 words", "examples": {"good": "Example", "bad": "Example"}}]}
+
+Requirements:
+- Write rule descriptions naturally. Most should include why the rule matters, but use varied sentence structures to avoid monotony: "Use contractions to sound conversational and warm." or "Stick with British spelling throughout." or "Keep sentences under 20 words, shorter sentences are easier to scan." or "Multiple exclamation marks feel jarring and lose impact."
+- Break monotony by using different sentence patterns: some with "to" connectors, some with periods separating the action from the benefit, some as observations. Vary opening words and structure.
+- Pick the single trait that best fits each rule; vary which traits you use across rules.
+- Examples must sound like ${brandDetails.name} speaking to ${brandDetails.audience}
+- Description 8-12 words max
+- Exactly 25 rules, one per category
+- Format times without extra spaces (e.g. "10:00 am" not "10: 00 am")
+- Use a space before quoted text (e.g. "Click \\"Mark as duplicate\\"" not "Click\\"Mark as duplicate\\"")
+- In the Emojis rule, do NOT use emoji characters in examples; use plain text only (avoids encoding artifacts)
+- ${NO_EM_DASH}`
+
+  return complete({
+    prompt,
+    system: "You are a tone of voice guide expert. Return a strict JSON object only.",
+    format: "json",
+    maxTokens: 3000,
+    effort: "none",
+    check: jsonCheck((value) => {
+      const list = Array.isArray(value) ? value : (value as { rules?: unknown } | null)?.rules
+      const { valid } = validateRules(list)
+      return valid.length >= 20 ? renderRulesMarkdown(valid.slice(0, 25)) : null
+    }),
+    signal: opts.signal,
+  })
+}
+
+const BEFORE_AFTER_TYPES = [
+  "Homepage Headline",
+  "Email Subject Line",
+  "Social Media Post",
+  "Error or Empty State Message",
+  "Blog Intro Paragraph",
+]
+
+const text = (v: unknown) => (typeof v === "string" ? v.trim() : "")
+
+/** Before/After examples to markdown: at most 5, skipping incomplete ones. */
+export function beforeAfterToMarkdown(examples: unknown): string {
+  if (!Array.isArray(examples)) return ""
+  return examples
+    .map((ex) => (ex && typeof ex === "object" ? (ex as Record<string, unknown>) : {}))
+    .filter((ex) => text(ex.before) && text(ex.after))
+    .slice(0, 5)
+    .map((ex, i) => {
+      const type = text(ex.contentType) || BEFORE_AFTER_TYPES[i] || `Example ${i + 1}`
+      return `### ${type}\n\n**Before:** ${text(ex.before)}\n\n**After:** ${text(ex.after)}`
+    })
+    .join("\n\n")
+}
+
+/** Before/After: 5 content types, generic copy rewritten in the brand voice. */
+export async function generateBeforeAfterSamples(
+  brandDetails: BrandPromptDetails,
+  traitsContext?: string,
+  opts: GenerateOptions = {},
+): Promise<GenerationResult> {
+  const prompt = `Create exactly 5 "Before → After" content transformation examples for ${brandDetails.name}. Each tied to a content type.
 
 Brand: ${brandDetails.name}
 Description: ${brandDetails.brandDetailsDescription}
-Audience: ${brandDetails.audience}${traitsSection}
+Audience: ${brandDetails.audience}${listLine("\nProducts/Services: ", brandDetails.productsServices, 15)}
+${traitsContext ? `Traits: ${traitsContext.slice(0, 800)}` : ""}
 
-IMPORTANT: Never use em dashes (—) in your output. Use hyphens (-) or rewrite sentences instead.
+Content types (one example each):
+${BEFORE_AFTER_TYPES.map((t, i) => `${i + 1}. ${t}`).join("\n")}
 
-Output markdown only.`;
+For each: "Before" = plausible generic copy (not absurdly bad). "After" = on-brand, demonstrates voice. 1-2 sentences each.
 
-  return generateWithOpenAI(
+${NO_EM_DASH}
+
+Return JSON:
+{"examples":[{"contentType":"Homepage Headline","before":"...","after":"..."}, ...]}`
+
+  return complete({
     prompt,
-    "You are a content strategist who creates actionable, brand-specific guidelines. Never use em dashes.",
-    "markdown",
-    800,
-    "gpt-5.2",
-    "low"
-  );
+    system:
+      "You are an expert copywriter who transforms generic content into distinctive brand voice. Return strict JSON only. Never use em dashes.",
+    format: "json",
+    maxTokens: 1200,
+    effort: "low",
+    check: jsonCheck((value) => beforeAfterToMarkdown((value as { examples?: unknown } | null)?.examples) || null),
+    signal: opts.signal,
+  })
 }
 
-// How to Use: mostly static template, brand name injected
-export function getHowToUseContent(brandName: string): string {
-  return `This document outlines the rules for brand voice, spelling, grammar, and formatting across all content channels. Anyone writing or publishing content for ${brandName} should follow these guidelines.
+const cell = (v: string) => v.replace(/\|/g, "\\|").replace(/\s*\n\s*/g, " ")
 
-### Who should use this document
-
-Content team members, freelancers, agencies, and anyone creating branded materials (including when briefing AI tools).
-
-### When to reference it
-
-- Starting new campaigns or content projects
-- Onboarding new writers or contractors
-- Reviewing drafts for brand consistency
-- Setting up AI writing assistants (paste into system prompt)
-
-### Using with AI tools
-
-Paste this guide into your AI tool's system prompt or instructions to ensure generated content matches your brand voice. Include the Brand Voice and Style Rules sections for best results.`;
+function termPair(item: unknown): [string, string] | null {
+  if (typeof item === "string") {
+    const [use, instead = ""] = item.split(" not ")
+    return use.trim() ? [use.trim(), instead.trim()] : null
+  }
+  if (item && typeof item === "object") {
+    const { use, insteadOf } = item as Record<string, unknown>
+    return text(use) ? [text(use), text(insteadOf)] : null
+  }
+  return null
 }
 
-// Word list: preferred terms, avoid terms, spelling/usage
-export async function generateWordList(brandDetails: any, traitsContext?: string): Promise<GenerationResult> {
-  const keywords =
-    Array.isArray(brandDetails.keywords) && brandDetails.keywords.length
-      ? brandDetails.keywords.slice(0, 25).join(", ")
-      : "none";
-  const productsServicesSection =
-    Array.isArray(brandDetails.productsServices) && brandDetails.productsServices.length
-      ? `\nProducts/Services: ${brandDetails.productsServices.slice(0, 15).join(", ")}`
-      : "";
-  const traitsSection = traitsContext ? `\nTraits: ${traitsContext.slice(0, 400)}` : "";
-  const ukUs = brandDetails.englishVariant === "british" ? "UK" : "US";
+function pairTable(title: string, items: unknown): string[] {
+  const rows = (Array.isArray(items) ? items : []).map(termPair).filter((p): p is [string, string] => !!p)
+  if (!rows.length) return []
+  return [
+    `### ${title}`,
+    "",
+    "| Use | Instead of |",
+    "|-----|------------|",
+    ...rows.map(([use, instead]) => `| ${cell(use)} | ${cell(instead)} |`),
+    "",
+  ]
+}
+
+/** Word list JSON to markdown tables. Empty subsections are omitted. */
+export function wordListToMarkdown(list: { preferredTerms?: unknown; avoidTerms?: unknown; spellingUsage?: unknown }): string {
+  const avoid = (Array.isArray(list.avoidTerms) ? list.avoidTerms : []).map(text).filter(Boolean)
+  const lines = [
+    ...pairTable("Preferred Terms", list.preferredTerms),
+    ...pairTable("Spelling and Usage", list.spellingUsage),
+    ...(avoid.length ? ["### Avoid Terms", "", "| Avoid |", "|-------|", ...avoid.map((t) => `| ${cell(t)} |`)] : []),
+  ]
+  return lines.join("\n").trim()
+}
+
+/** Word List: preferred terms, spelling/usage and terms to avoid. */
+export async function generateWordList(
+  brandDetails: BrandPromptDetails,
+  traitsContext?: string,
+  opts: GenerateOptions = {},
+): Promise<GenerationResult> {
+  const keywords = stringList(brandDetails.keywords, 25).join(", ") || "none"
+  const ukUs = brandDetails.englishVariant === "british" ? "UK" : "US"
   const prompt = `Create a Word List for this brand. Return JSON with three arrays:
 
 {
@@ -686,76 +451,34 @@ export async function generateWordList(brandDetails: any, traitsContext?: string
 - **spellingUsage** (3-5 items): Contested spellings for ${ukUs} English and industry terms. Each item has "use" and "insteadOf" fields.
 
 Brand: ${brandDetails.name}
-Description: ${brandDetails.brandDetailsDescription}${productsServicesSection}${traitsSection}
+Description: ${brandDetails.brandDetailsDescription}${listLine("\nProducts/Services: ", brandDetails.productsServices, 15)}${traitsContext ? `\nTraits: ${traitsContext.slice(0, 400)}` : ""}
 
-IMPORTANT: Never use em dashes (—) in your output. Use hyphens (-) or rewrite instead.
+${NO_EM_DASH}
 
-Return strict JSON only.`;
+Return strict JSON only.`
 
-  const result = await generateWithOpenAI(
+  return complete({
     prompt,
-    "You are a brand voice expert. Return strict JSON only.",
-    "json",
-    600,
-    "gpt-5.2",
-    "low"
-  );
-
-  if (!result.success || !result.content) return result;
-
-  try {
-    const parsed = JSON.parse(result.content);
-    const pref = Array.isArray(parsed.preferredTerms) ? parsed.preferredTerms : [];
-    const avoid = Array.isArray(parsed.avoidTerms) ? parsed.avoidTerms : [];
-    const spell = Array.isArray(parsed.spellingUsage) ? parsed.spellingUsage : [];
-    const lines: string[] = [];
-
-    // Preferred Terms - two-column table
-    if (pref.length) {
-      lines.push("### Preferred Terms", "");
-      lines.push("| Use | Instead of |");
-      lines.push("|-----|------------|");
-      pref.forEach((item: any) => {
-        const use = typeof item === 'object' ? (item.use || '') : item.split(' not ')[0] || '';
-        const instead = typeof item === 'object' ? (item.insteadOf || '') : item.split(' not ')[1] || '';
-        lines.push(`| ${use} | ${instead} |`);
-      });
-      lines.push("");
-    }
-
-    // Spelling and Usage - two-column table
-    if (spell.length) {
-      lines.push("### Spelling and Usage", "");
-      lines.push("| Use | Instead of |");
-      lines.push("|-----|------------|");
-      spell.forEach((item: any) => {
-        const use = typeof item === 'object' ? (item.use || '') : item.split(' not ')[0] || '';
-        const instead = typeof item === 'object' ? (item.insteadOf || '') : item.split(' not ')[1] || '';
-        lines.push(`| ${use} | ${instead} |`);
-      });
-      lines.push("");
-    }
-
-    // Avoid Terms - last subsection
-    if (avoid.length) {
-      lines.push("### Avoid Terms", "");
-      lines.push("| Avoid |");
-      lines.push("|-------|");
-      avoid.forEach((term: string) => {
-        lines.push(`| ${String(term)} |`);
-      });
-    }
-
-    return { success: true, content: lines.join("\n").trim() };
-  } catch (e) {
-    return { success: false, error: "Invalid word list JSON" };
-  }
+    system: "You are a brand voice expert. Return strict JSON only.",
+    format: "json",
+    maxTokens: 1000,
+    effort: "low",
+    check: jsonCheck((value) => (value && typeof value === "object" ? wordListToMarkdown(value) || null : null)),
+    signal: opts.signal,
+  })
 }
 
-// Generate keywords for content marketing and brand voice
-export async function generateKeywords(params: { name: string; brandDetailsDescription: string; audience?: string }): Promise<GenerationResult> {
-  const { name, brandDetailsDescription, audience = 'general audience' } = params
-  
+// ---------------------------------------------------------------------------
+// Extraction helpers (used by /api/extract-website)
+// ---------------------------------------------------------------------------
+
+/** Up to 25 keywords. Content is JSON text: {"keywords": string[]}. */
+export async function generateKeywords(params: {
+  name: string
+  brandDetailsDescription: string
+  audience?: string
+}): Promise<GenerationResult> {
+  const { name, brandDetailsDescription, audience = "general audience" } = params
   const prompt = `Generate up to 25 high-value keywords for this brand's content marketing and communications.
 
 - Brand
@@ -770,70 +493,83 @@ export async function generateKeywords(params: { name: string; brandDetailsDescr
   - Each keyword MUST be 20 characters or less (including spaces)
   - Prefer 1-2 words; use 3 words only if under 20 chars
   - Choose terms that would appear in blog posts, marketing copy, and user communications
-  
+
 - Output format
   - Return clean JSON: {"keywords": ["keyword1", "keyword2", ...]}
   - 15-25 keywords`
 
-  return generateWithOpenAI(
+  return complete({
     prompt,
-    "You are a keyword expert focused on content marketing terms.",
-    "json",
-    800,
-    "gpt-5.2",
-    "none"
-  )
+    system: "You are a keyword expert focused on content marketing terms.",
+    format: "json",
+    maxTokens: 800,
+    effort: "none",
+    check: jsonCheck((value) => {
+      const seen = new Set<string>()
+      const keywords = stringList((value as { keywords?: unknown } | null)?.keywords, 100).filter((k) => {
+        const key = k.toLowerCase()
+        if (seen.has(key)) return false
+        seen.add(key)
+        return true
+      })
+      return keywords.length ? JSON.stringify({ keywords: keywords.slice(0, 25) }) : null
+    }),
+  })
 }
 
-// Generate a short internal audience description (1–2 sentences, ~25–40 words)
-export async function generateAudienceSummary(params: { name: string; brandDetailsDescription: string }): Promise<GenerationResult> {
-  const { name, brandDetailsDescription } = params
+/** Short internal audience description (1-2 sentences). Plain text. */
+export async function generateAudienceSummary(params: {
+  name: string
+  brandDetailsDescription: string
+}): Promise<GenerationResult> {
   const prompt = `Based on the brand below, write a concise audience description (1–2 sentences, ~25–40 words). Keep it practical and specific. Output plain text only.
 
-Brand Name: ${name}
-What they do: ${brandDetailsDescription}`
+Brand Name: ${params.name}
+What they do: ${params.brandDetailsDescription}`
 
-  return generateWithOpenAI(
+  return complete({
     prompt,
-    "You are a brand strategist who writes precise, practical audience descriptions.",
-    "markdown",
-    200,
-    "gpt-5.2",
-    "low"
-  )
+    system: "You are a brand strategist who writes precise, practical audience descriptions.",
+    format: "markdown",
+    maxTokens: 400,
+    effort: "low",
+  })
 }
 
-// Function to generate a concise brand summary from a single textarea
-export async function generateBrandSummary(brandDetails: any): Promise<GenerationResult> {
-  const prompt = `Write a single paragraph (30–40 words) that starts with the brand name and summarizes the brand using all key info, keywords, and terms from the input below.\n\nBrand Info:\n${brandDetails.brandDetailsText}`;
-  return generateWithOpenAI(prompt, "You are a brand strategist.", "markdown", 2000, "gpt-5.2", "low");
+/** One-paragraph brand summary from free text. */
+export async function generateBrandSummary(brandDetails: { brandDetailsText?: string }): Promise<GenerationResult> {
+  const prompt = `Write a single paragraph (30–40 words) that starts with the brand name and summarizes the brand using all key info, keywords, and terms from the input below.\n\nBrand Info:\n${brandDetails.brandDetailsText}`
+  return complete({ prompt, system: "You are a brand strategist.", format: "markdown", maxTokens: 2000, effort: "low" })
 }
 
-// Function to extract just the brand name from brandDetailsText
-export async function extractBrandName(brandDetails: any): Promise<GenerationResult> {
-  const prompt = `Extract only the brand name from the text below. Return just the brand name, nothing else.\n\nBrand Info:\n${brandDetails.brandDetailsText}`;
-  return generateWithOpenAI(prompt, "You are a brand analyst. Extract only the brand name from the given text.", "markdown", 2000, "gpt-5.2", "low");
-}
-
-// Generate trait suggestions based on brand information
-export async function generateTraitSuggestions(brandDetails: any): Promise<GenerationResult> {
+/** Up to 3 suggested traits from the predefined list. Content is a JSON array of trait names. */
+export async function generateTraitSuggestions(brandDetails: {
+  name?: string
+  brandDetailsDescription?: string
+  brandDetailsText?: string
+  audience?: string
+  targetAudience?: string
+}): Promise<GenerationResult> {
   const prompt = `Based on this brand information, suggest exactly 3 brand voice traits that would work best for this brand.
 
-Brand Name: ${brandDetails.name || 'Brand'}
+Brand Name: ${brandDetails.name || "Brand"}
 Description: ${brandDetails.brandDetailsDescription || brandDetails.brandDetailsText}
 Audience: ${brandDetails.audience || brandDetails.targetAudience}
 
-Available traits: Assertive, Witty, Direct, Inspiring, Warm, Inclusive, Playful, Supportive, Refined
+Available traits (use only these exact names): ${TRAIT_NAMES.join(", ")}
 
-Return ONLY a JSON array with exactly 3 trait names, like this:
-["Warm", "Professional", "Inspiring"]`
+Return ONLY a JSON object with exactly 3 trait names, like this:
+{"traits": ["Warm", "Direct", "Inspiring"]}`
 
-  return generateWithOpenAI(
+  return complete({
     prompt,
-    "You are a brand voice expert. Choose the 3 most fitting traits for this brand.",
-    "json",
-    100,
-    "gpt-5.2",
-    "none"
-  )
+    system: "You are a brand voice expert. Choose the 3 most fitting traits for this brand.",
+    format: "json",
+    maxTokens: 200,
+    effort: "none",
+    check: jsonCheck((value) => {
+      const traits = parseTraitSuggestions(value).slice(0, 3)
+      return traits.length ? JSON.stringify(traits) : null
+    }),
+  })
 }

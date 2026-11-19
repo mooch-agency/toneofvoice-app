@@ -207,8 +207,19 @@ export function replaceSectionInMarkdown(markdown: string, sectionId: string, ne
   if (spans.length === 0) return sectionId === "content" ? newContent.trim() : markdown
 
   const span = spans.find((s) => s.id === sectionId)
-  if (!span) return markdown
+  return span ? replaceSpan(markdown, span, newContent) : markdown
+}
 
+/** Replace a section's body, keeping its heading line and trailing `---`. */
+export function replaceSectionBody(markdown: string, sectionId: string, newBody: string): string {
+  if (!markdown) return markdown
+  const span = scanSections(markdown).find((s) => s.id === sectionId)
+  if (!span) return markdown
+  const heading = markdown.slice(span.start, span.contentStart).trim()
+  return replaceSpan(markdown, span, `${heading}\n\n${newBody.trim()}`)
+}
+
+function replaceSpan(markdown: string, span: SectionSpan, newContent: string): string {
   const replacement = newContent.trim()
   const keepRule = TRAILING_RULE.test(markdown.slice(span.start, span.end)) && !TRAILING_RULE.test(replacement)
   const before = markdown.slice(0, span.start)

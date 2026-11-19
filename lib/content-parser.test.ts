@@ -5,6 +5,7 @@ import {
   getSectionIdFromHeading,
   insertCustomSection,
   parseStyleGuideContent,
+  replaceSectionBody,
   replaceSectionInMarkdown,
 } from "./content-parser"
 import { renderRulesMarkdown } from "./rules-renderer"
@@ -104,6 +105,19 @@ describe("replaceSectionInMarkdown", () => {
 
   it("replaces the single section of heading-less markdown", () => {
     expect(replaceSectionInMarkdown("just text", "content", "new")).toBe("new")
+  })
+})
+
+describe("replaceSectionBody", () => {
+  it("keeps the heading and separator and swaps the body", () => {
+    const out = replaceSectionBody(GUIDE, "style-rules", "RULES")
+    expect(out).toContain("## Style Rules\n\nRULES\n\n---\n\n## Before / After")
+    expect(out).toContain("## Brand Voice\n\n### 1. Warm")
+  })
+
+  it("works for the last section and leaves unknown ids alone", () => {
+    expect(replaceSectionBody(GUIDE, "contact", "Mail us").endsWith("## Questions?\n\nMail us")).toBe(true)
+    expect(replaceSectionBody(GUIDE, "word-list", "x")).toBe(GUIDE)
   })
 })
 

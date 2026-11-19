@@ -1,15 +1,16 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest"
-import { ALLOWED_RULE_CATEGORIES, canonicalRuleCategory, validateRules } from "./rules-schema"
+import { ALLOWED_RULE_CATEGORIES, canonicalRuleCategory, validateRules, type StyleRule } from "./rules-schema"
 import { renderRulesMarkdown, sanitizeRuleText } from "./rules-renderer"
 
-const rule = (over: Record<string, unknown> = {}) => ({
-  category: "Contractions",
-  title: "Contractions",
-  description: "Use contractions to sound warm.",
-  examples: { good: "We're here.", bad: "We are here." },
-  ...over,
-})
+const rule = (over: Record<string, unknown> = {}) =>
+  ({
+    category: "Contractions",
+    title: "Contractions",
+    description: "Use contractions to sound warm.",
+    examples: { good: "We're here.", bad: "We are here." },
+    ...over,
+  }) as StyleRule
 
 describe("canonicalRuleCategory", () => {
   it.each([
