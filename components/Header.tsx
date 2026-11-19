@@ -19,7 +19,6 @@ const NAV_LINKS = [
 interface HeaderProps {
   showNavigation?: boolean
   showGetStarted?: boolean
-  variant?: "default" | "minimal"
   rightContent?: ReactNode
   containerClass?: string
 }
@@ -27,7 +26,6 @@ interface HeaderProps {
 export default function Header({
   showNavigation = false,
   showGetStarted = false,
-  variant = "minimal",
   rightContent,
   containerClass,
 }: HeaderProps) {

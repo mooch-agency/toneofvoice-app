@@ -7,7 +7,6 @@ import {
   AIPlugin,
   rejectAISuggestions,
   useEditorChat,
-  useLastAssistantMessage,
 } from '@platejs/ai/react';
 import { BlockSelectionPlugin, useIsSelecting } from '@platejs/selection/react';
 import { Command as CommandPrimitive } from 'cmdk';
@@ -535,8 +534,8 @@ export function AILoadingBar() {
   const chat = usePluginOption(AIChatPlugin, 'chat');
   const mode = usePluginOption(AIChatPlugin, 'mode');
   const toolName = usePluginOption(AIChatPlugin, 'toolName');
-  const { status, messages } = chat;
-  const { api, editor } = useEditorPlugin(AIChatPlugin);
+  const { status } = chat;
+  const { api } = useEditorPlugin(AIChatPlugin);
 
   const isLoading = status === 'streaming' || status === 'submitted';
 

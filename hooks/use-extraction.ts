@@ -131,16 +131,6 @@ export function useExtraction<T extends InputEl = HTMLTextAreaElement>({
     return validation.isValid
   }
 
-  const handleInputValidation = (input: string) => {
-    const validation = validateInput(input)
-    if (!validation.isValid && validation.error) {
-      setError(validation.error)
-      return false
-    }
-    setError("")
-    return validation
-  }
-
   const resetState = () => {
     setIsExtracting(false)
     setLoadingMessage("")
