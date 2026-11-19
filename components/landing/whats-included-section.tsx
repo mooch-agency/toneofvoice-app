@@ -1,5 +1,3 @@
-"use client"
-
 import { WHATS_INCLUDED_FEATURES } from "@/lib/landing-data"
 
 export default function WhatsIncludedSection() {

@@ -116,10 +116,11 @@ export default function HeroSection() {
 
                   <Button
                     type="submit"
-                    onClick={() =>
-                      track("Generate Button Clicked", { hasUrl: !!url.trim(), location: "hero" }) ||
-                      mpTrack("Generate Button Clicked", { hasUrl: !!url.trim(), location: "hero" })
-                    }
+                    onClick={() => {
+                      const props = { hasUrl: !!url.trim(), location: "hero" }
+                      track("Generate Button Clicked", props)
+                      mpTrack("Generate Button Clicked", props)
+                    }}
                     disabled={isExtracting || isSuccess || !isInputValid()}
                     className={cn(
                       "w-full sm:w-auto shrink-0 rounded-xl px-5 h-11 bg-black text-white font-semibold text-sm",
