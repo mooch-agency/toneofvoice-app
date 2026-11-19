@@ -1,7 +1,23 @@
 // File generation utilities for style guide exports
-import { Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType, BorderStyle } from "docx"
+import {
+  AlignmentType,
+  BorderStyle,
+  Document,
+  HeadingLevel,
+  LevelFormat,
+  Packer,
+  Paragraph,
+  Table,
+  TableCell,
+  TableRow,
+  TextRun,
+  WidthType,
+} from "docx"
 
-export type FileFormat = "pdf" | "md" | "docx"
+/** Formats built from markdown. PDF is rendered from the DOM (see app/guide). */
+export type FileFormat = "md" | "docx"
+
+const NUMBERING_REFERENCE = "guide-numbering"
 
 export interface FileGenerationOptions {
   websiteUrl?: string
@@ -9,9 +25,12 @@ export interface FileGenerationOptions {
   generationDate?: string
 }
 
-/**
- * Generate a file in the specified format with the given content
- */
+const formatDate = (date?: string) =>
+  date || new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" })
+
+const displayUrl = (url: string) => url.replace(/^https?:\/\/(www\.)?/, "").replace(/\/$/, "")
+
+/** Generate a Markdown or Word file for the guide. Errors are logged without content. */
 export async function generateFile(
   format: FileFormat,
   content: string,
@@ -19,112 +38,51 @@ export async function generateFile(
   options: FileGenerationOptions = {}
 ): Promise<Blob> {
   try {
-  switch (format) {
-    case "md":
-      return generateMarkdown(content, brandName, options)
-    case "docx":
-      return generateDOCX(content, brandName, options)
-    default:
-      throw new Error(`Unsupported format: ${format}`)
-  }
+    return format === "md" ? generateMarkdown(content, brandName, options) : await generateDOCX(content, brandName, options)
   } catch (error) {
-    console.error('[File Generator] File generation error:', {
-      error: error instanceof Error ? error.message : 'Unknown error',
-      stack: error instanceof Error ? error.stack : undefined,
+    console.error("[File Generator] generation failed", {
       format,
-      brandName,
-      contentLength: content.length
+      error: error instanceof Error ? error.message : "Unknown error",
+      contentLength: content.length,
     })
-    const formatName = format.toUpperCase()
-    throw new Error(`Failed to generate ${formatName} file. Please try again or contact support.`)
+    throw new Error(`Failed to generate ${format.toUpperCase()} file. Please try again or contact support.`)
   }
 }
 
-/**
- * Generate a properly formatted Markdown document with cover section
- */
-function generateMarkdown(content: string, brandName: string, options: FileGenerationOptions): Promise<Blob> {
-  try {
-    const { websiteUrl, subscriptionTier = 'starter', generationDate } = options
-    const formattedDate = generationDate || new Date().toLocaleDateString('en-US', {
-      year: 'numeric',
-      month: 'long',
-      day: 'numeric'
-    })
-
-    // Build cover section in markdown format
-    let cover = `# ${brandName}\n\n`
-    cover += `*Brand Voice & Content Guidelines*\n\n`
-    cover += `---\n\n`
-    cover += `${formattedDate}\n\n`
-
-    if (websiteUrl) {
-      const displayUrl = websiteUrl.replace(/^https?:\/\/(www\.)?/, '').replace(/\/$/, '')
-      cover += `${displayUrl}\n\n`
-    }
-
-    // Add branding footer based on tier
-    if (subscriptionTier === 'starter' || subscriptionTier === 'pro') {
-      cover += `[Tone of Voice App](https://toneofvoice.app)\n\n`
-    }
-
-    cover += `---\n\n`
-
-    const fullContent = cover + content
-    return Promise.resolve(new Blob([fullContent], { type: "text/markdown" }))
-  } catch (error) {
-    console.error('[File Generator] Markdown generation error:', {
-      error: error instanceof Error ? error.message : 'Unknown error',
-      stack: error instanceof Error ? error.stack : undefined,
-      contentLength: content.length
-    })
-    throw new Error('Failed to generate Markdown file. Please try again or contact support.')
-  }
+/** Markdown file: a short cover block followed by the guide body. */
+function generateMarkdown(content: string, brandName: string, options: FileGenerationOptions): Blob {
+  const { websiteUrl, subscriptionTier = "starter", generationDate } = options
+  let cover = `# ${brandName}\n\n*Brand Voice & Content Guidelines*\n\n---\n\n${formatDate(generationDate)}\n\n`
+  if (websiteUrl) cover += `${displayUrl(websiteUrl)}\n\n`
+  if (subscriptionTier !== "agency") cover += `[Tone of Voice App](https://toneofvoice.app)\n\n`
+  cover += `---\n\n`
+  return new Blob([cover + content], { type: "text/markdown" })
 }
 
-/**
- * Generate a properly formatted DOCX document using the docx library
- */
+/** Word file built with the docx library. */
 async function generateDOCX(content: string, brandName: string, options: FileGenerationOptions): Promise<Blob> {
-  try {
-    const paragraphs = parseMarkdownToDocxParagraphs(content, brandName, options)
-
-    const doc = new Document({
-      sections: [{
-        properties: {},
-        children: paragraphs
-      }]
-    })
-
-    const buffer = await Packer.toBuffer(doc)
-    return new Blob([new Uint8Array(buffer)], {
-      type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-    })
-  } catch (error) {
-    console.error('[File Generator] DOCX generation error:', {
-      error: error instanceof Error ? error.message : 'Unknown error',
-      stack: error instanceof Error ? error.stack : undefined,
-      brandName,
-      contentLength: content.length
-    })
-    throw new Error('Failed to generate DOCX file. Please try again or contact support.')
-  }
+  const doc = new Document({
+    numbering: {
+      config: [
+        {
+          reference: NUMBERING_REFERENCE,
+          levels: [{ level: 0, format: LevelFormat.DECIMAL, text: "%1.", alignment: AlignmentType.START }],
+        },
+      ],
+    },
+    sections: [{ properties: {}, children: parseMarkdownToDocxParagraphs(content, brandName, options) }],
+  })
+  const buffer = await Packer.toBuffer(doc)
+  return new Blob([new Uint8Array(buffer)], {
+    type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  })
 }
 
-
-
-/**
- * Parse markdown content into DOCX paragraphs
- */
-function parseMarkdownToDocxParagraphs(content: string, brandName: string, options: FileGenerationOptions): Paragraph[] {
+/** Cover paragraphs followed by the guide body. */
+function parseMarkdownToDocxParagraphs(content: string, brandName: string, options: FileGenerationOptions): (Paragraph | Table)[] {
   const paragraphs: Paragraph[] = []
-
-  const { websiteUrl, subscriptionTier = 'starter', generationDate } = options
-  const formattedDate = generationDate || new Date().toLocaleDateString('en-US', {
-    year: 'numeric',
-    month: 'long',
-    day: 'numeric'
-  })
+  const { websiteUrl, subscriptionTier = "starter", generationDate } = options
+  const formattedDate = formatDate(generationDate)
 
   // Add eyebrow
   paragraphs.push(
@@ -176,10 +134,9 @@ function parseMarkdownToDocxParagraphs(content: string, brandName: string, optio
 
   // Add website URL if available
   if (websiteUrl) {
-    const displayUrl = websiteUrl.replace(/^https?:\/\/(www\.)?/, '').replace(/\/$/, '')
     paragraphs.push(
       new Paragraph({
-        children: [new TextRun({ text: displayUrl, size: 20, bold: true })],
+        children: [new TextRun({ text: displayUrl(websiteUrl), size: 20, bold: true })],
         spacing: { after: 240 }
       })
     )
@@ -207,97 +164,110 @@ function parseMarkdownToDocxParagraphs(content: string, brandName: string, optio
     )
   }
   
-  const lines = content.split('\n')
-  let i = 0
-  
-  while (i < lines.length) {
-    const line = lines[i].trim()
-    
-    if (!line) {
-      i++
-      continue
-    }
-    
-    // Handle headers
-    if (line.startsWith('#')) {
-      const level = line.match(/^#+/)?.[0].length || 1
-      const text = line.replace(/^#+\s*/, '')
-      
-      let headingLevel: typeof HeadingLevel[keyof typeof HeadingLevel]
-      let fontSize = 24
-      
-      switch (level) {
-        case 1: headingLevel = HeadingLevel.HEADING_1; fontSize = 24; break
-        case 2: headingLevel = HeadingLevel.HEADING_2; fontSize = 20; break
-        case 3: headingLevel = HeadingLevel.HEADING_3; fontSize = 16; break
-        case 4: headingLevel = HeadingLevel.HEADING_4; fontSize = 14; break
-        default: headingLevel = HeadingLevel.HEADING_5; fontSize = 12; break
-      }
-      
-      paragraphs.push(
+  return [...paragraphs, ...markdownToDocxBlocks(content)]
+}
+
+const TABLE_ROW = /^\|.*\|$/
+const TABLE_DIVIDER = /^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?$/
+
+function tableCells(line: string): string[] {
+  return line.replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => c.trim())
+}
+
+function markdownTable(rows: string[]): Table {
+  const body = rows.filter((r) => !TABLE_DIVIDER.test(r)).map(tableCells)
+  const columns = Math.max(...body.map((r) => r.length))
+  return new Table({
+    width: { size: 100, type: WidthType.PERCENTAGE },
+    rows: body.map(
+      (cells, rowIndex) =>
+        new TableRow({
+          tableHeader: rowIndex === 0,
+          children: Array.from({ length: columns }, (_, c) =>
+            new TableCell({
+              children: [
+                new Paragraph({
+                  children: rowIndex === 0
+                    ? [new TextRun({ text: cells[c] ?? "", bold: true })]
+                    : parseFormattedText(cells[c] ?? ""),
+                }),
+              ],
+            })
+          ),
+        })
+    ),
+  })
+}
+
+const HEADING_LEVELS = [
+  { heading: HeadingLevel.HEADING_1, size: 24 },
+  { heading: HeadingLevel.HEADING_2, size: 20 },
+  { heading: HeadingLevel.HEADING_3, size: 16 },
+  { heading: HeadingLevel.HEADING_4, size: 14 },
+  { heading: HeadingLevel.HEADING_5, size: 12 },
+]
+
+/** Convert the guide body (headings, lists, rules, tables, paragraphs) into DOCX blocks. */
+function markdownToDocxBlocks(content: string): (Paragraph | Table)[] {
+  const blocks: (Paragraph | Table)[] = []
+  const lines = content.split("\n").map((l) => l.trim())
+  // Each separate numbered list restarts at 1.
+  let listInstance = 0
+  let inNumberedList = false
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    const isNumbered = /^\d+\.\s+/.test(line)
+    if (!isNumbered && line) inNumberedList = false
+    if (!line) continue
+
+    if (TABLE_ROW.test(line)) {
+      const rows: string[] = []
+      while (i < lines.length && TABLE_ROW.test(lines[i])) rows.push(lines[i++])
+      i--
+      blocks.push(markdownTable(rows))
+    } else if (line.startsWith("#")) {
+      const level = Math.min(line.match(/^#+/)![0].length, HEADING_LEVELS.length)
+      const { heading, size } = HEADING_LEVELS[level - 1]
+      blocks.push(
         new Paragraph({
-          children: [new TextRun({ text, bold: true, size: fontSize * 2 })],
-          heading: headingLevel,
-          spacing: { before: 240, after: 120 }
+          children: [new TextRun({ text: line.replace(/^#+\s*/, ""), bold: true, size: size * 2 })],
+          heading,
+          spacing: { before: 240, after: 120 },
         })
       )
-    }
-    // Handle horizontal rules
-    else if (line === '---') {
-      paragraphs.push(
+    } else if (/^-{3,}$/.test(line)) {
+      blocks.push(
         new Paragraph({
-          children: [new TextRun({ text: '', size: 20 })],
+          children: [new TextRun({ text: "", size: 20 })],
           spacing: { before: 200, after: 200 },
-          border: {
-            bottom: {
-              color: "auto",
-              space: 1,
-              style: BorderStyle.SINGLE,
-              size: 6
-            }
-          }
+          border: { bottom: { color: "auto", space: 1, style: BorderStyle.SINGLE, size: 6 } },
         })
       )
-    }
-    // Handle bullet points
-    else if (line.match(/^[-*+]\s+/)) {
-      const text = line.replace(/^[-*+]\s+/, '')
-      const textRuns = parseFormattedText(text)
-      paragraphs.push(
+    } else if (/^[-*+]\s+/.test(line)) {
+      blocks.push(
         new Paragraph({
-          children: textRuns,
+          children: parseFormattedText(line.replace(/^[-*+]\s+/, "")),
           bullet: { level: 0 },
-          spacing: { after: 60 }
+          spacing: { after: 60 },
         })
       )
-    }
-    // Handle numbered lists
-    else if (line.match(/^\d+\.\s+/)) {
-      const text = line.replace(/^\d+\.\s+/, '')
-      const textRuns = parseFormattedText(text)
-      paragraphs.push(
+    } else if (isNumbered) {
+      if (!inNumberedList) listInstance++
+      inNumberedList = true
+      blocks.push(
         new Paragraph({
-          children: textRuns,
-          numbering: { reference: "default-numbering", level: 0 },
-          spacing: { after: 60 }
+          children: parseFormattedText(line.replace(/^\d+\.\s+/, "")),
+          numbering: { reference: NUMBERING_REFERENCE, level: 0, instance: listInstance },
+          spacing: { after: 60 },
         })
       )
+    } else {
+      blocks.push(new Paragraph({ children: parseFormattedText(line), spacing: { after: 120 } }))
     }
-    // Handle regular paragraphs with formatting
-    else {
-      const textRuns = parseFormattedText(line)
-      paragraphs.push(
-        new Paragraph({
-          children: textRuns,
-          spacing: { after: 120 }
-        })
-      )
-    }
-    
-    i++
   }
-  
-  return paragraphs
+
+  return blocks
 }
 
 /**
@@ -305,24 +275,9 @@ function parseMarkdownToDocxParagraphs(content: string, brandName: string, optio
  */
 function parseFormattedText(text: string): TextRun[] {
   const runs: TextRun[] = []
-  let currentText = text
-  
-  // Enhanced Unicode/emoji handling - preserve most emojis, convert problematic ones
-  currentText = currentText
-    // Keep common emojis that work well in Word
-    .replace(/💪/g, '💪') // Keep muscle emoji
-    .replace(/🏃/g, '🏃') // Keep runner emoji
-    .replace(/⚡/g, '⚡') // Keep lightning
-    .replace(/🎯/g, '🎯') // Keep target
-    // Convert checkmarks and X marks to Word-compatible symbols
-    .replace(/✅/g, '✓')
-    .replace(/❌/g, '✗')
-    // Convert arrows to Word-compatible symbols
-    .replace(/→/g, '→')
-    .replace(/←/g, '←')
-    .replace(/↑/g, '↑')
-    .replace(/↓/g, '↓')
-  
+  // Word renders these emoji poorly; use plain symbols.
+  const currentText = text.replace(/✅/g, "✓").replace(/❌/g, "✗")
+
   // Enhanced parsing for bold, italic, and inline code
   const parts = currentText.split(/(\*\*.*?\*\*|\*.*?\*|`.*?`)/g)
   
@@ -360,35 +315,6 @@ export function downloadFile(blob: Blob, filename: string): void {
   document.body.appendChild(a)
   a.click()
   document.body.removeChild(a)
-  URL.revokeObjectURL(url)
-}
-
-/**
- * Generate a file in the specified format with proper MIME type
- */
-export async function generateFileWithMimeType(
-  format: FileFormat,
-  content: string,
-): Promise<{ blob: Blob; mimeType: string }> {
-  console.log(`Generating ${format} file with content length: ${content.length}`)
-
-  let mimeType = "text/plain"
-
-  // Set the correct mime type based on format
-  switch (format) {
-    case "pdf":
-      mimeType = "application/pdf"
-      break
-    case "md":
-      mimeType = "text/markdown"
-      break
-    case "docx":
-      mimeType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-      break
-  }
-
-  // Create a blob with the appropriate content and MIME type
-  const blob = new Blob([content], { type: mimeType })
-
-  return { blob, mimeType }
+  // Revoke after the click has been handled; some browsers cancel the download otherwise.
+  setTimeout(() => URL.revokeObjectURL(url), 0)
 }
