@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { beforeEach, describe, expect, it, vi } from "vitest"
-import { fakeSupabase, type FakeQuery, type FakeResult } from "@/supabase/testing/fake-client"
+import { fakeSupabase, type FakeQuery, type FakeResult } from "@/test/supabase-fake"
 import { TIER_LIMITS, type Tier } from "@/lib/tiers"
 
 const h = vi.hoisted(() => ({

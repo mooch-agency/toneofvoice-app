@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type Stripe from "stripe"
-import { fakeSupabase, type FakeHandler } from "@/supabase/testing/fake-client"
+import { fakeSupabase, type FakeHandler } from "@/test/supabase-fake"
 
 const h = vi.hoisted(() => ({
   StripeCtor: vi.fn(),

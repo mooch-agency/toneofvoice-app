@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { fakeSupabase, type FakeHandler, type FakeQuery } from "@/supabase/testing/fake-client"
+import { fakeSupabase, type FakeHandler, type FakeQuery } from "@/test/supabase-fake"
 
 const h = vi.hoisted(() => ({
   stripe: {
@@ -8,12 +8,10 @@ const h = vi.hoisted(() => ({
     subscriptions: { retrieve: vi.fn() },
   },
   admin: null as unknown,
-  sendThankYouEmail: vi.fn(),
 }))
 
 vi.mock("stripe", () => ({ default: function Stripe() { return h.stripe } }))
 vi.mock("@/lib/supabase-admin", () => ({ getSupabaseAdmin: () => h.admin }))
-vi.mock("@/lib/email-service", () => ({ emailService: { sendThankYouEmail: h.sendThankYouEmail } }))
 
 import { POST } from "./route"
 
@@ -83,8 +81,6 @@ beforeEach(() => {
   h.stripe.webhooks.constructEvent.mockReset()
   h.stripe.subscriptions.retrieve.mockReset()
   h.stripe.subscriptions.retrieve.mockResolvedValue(subscription())
-  h.sendThankYouEmail.mockReset()
-  h.sendThankYouEmail.mockResolvedValue({ success: true })
   vi.spyOn(console, "error").mockImplementation(() => {})
   vi.spyOn(console, "log").mockImplementation(() => {})
   vi.spyOn(console, "warn").mockImplementation(() => {})
@@ -168,20 +164,13 @@ describe("checkout.session.completed", () => {
     expect(profileUpdates).toHaveLength(2)
   })
 
-  it("sends the thank-you email once", async () => {
+  it("sends no email (subscriptions never emailed; email module removed)", async () => {
+    vi.stubEnv("RESEND_API_KEY", "re_test")
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("{}"))
     h.stripe.webhooks.constructEvent.mockReturnValue(checkoutEvent())
-    await POST(request())
-    expect(h.sendThankYouEmail).toHaveBeenCalledTimes(1)
-    expect(h.sendThankYouEmail).toHaveBeenCalledWith(
-      expect.objectContaining({ customerEmail: "a@b.co", customerName: "Ada Lovelace" }),
-    )
-  })
-
-  it("does not fail the event when the email fails", async () => {
-    h.sendThankYouEmail.mockRejectedValue(new Error("resend down"))
-    h.stripe.webhooks.constructEvent.mockReturnValue(checkoutEvent())
-    const res = await POST(request())
-    expect(res.status).toBe(200)
+    expect((await POST(request())).status).toBe(200)
+    expect(fetchSpy).not.toHaveBeenCalled()
+    vi.unstubAllEnvs()
   })
 
   it("ignores one-time payment sessions (legacy flow removed, SEC-17)", async () => {
@@ -191,7 +180,6 @@ describe("checkout.session.completed", () => {
     const res = await POST(request())
     expect(res.status).toBe(200)
     expect(profileUpdates).toHaveLength(0)
-    expect(h.sendThankYouEmail).not.toHaveBeenCalled()
   })
 })
 
@@ -201,7 +189,6 @@ describe("idempotency (SEC-16)", () => {
     expect((await POST(request())).status).toBe(200)
     expect((await POST(request())).status).toBe(200)
     expect(profileUpdates).toHaveLength(1)
-    expect(h.sendThankYouEmail).toHaveBeenCalledTimes(1)
   })
 
   it("still processes events when the stripe_events table is missing", async () => {

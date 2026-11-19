@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server"
 import type Stripe from "stripe"
-import { emailService } from "@/lib/email-service"
 import { getSupabaseAdmin } from "@/lib/supabase-admin"
 import { StripeNotConfiguredError, applySubscriptionToProfile, getStripe, getWebhookSecret } from "@/lib/stripe"
 
@@ -74,7 +73,6 @@ async function handleCheckoutCompleted(session: Stripe.Checkout.Session) {
 
   const subscription = await getStripe().subscriptions.retrieve(subId)
   await applySubscriptionToProfile({ userId }, subscription)
-  await sendThankYouEmail(session)
 }
 
 async function handleSubscriptionChange(event: Stripe.Event) {
@@ -84,21 +82,6 @@ async function handleSubscriptionChange(event: Stripe.Event) {
   const current =
     event.type === "customer.subscription.deleted" ? sub : await getStripe().subscriptions.retrieve(sub.id)
   await applySubscriptionToProfile({ subscriptionId: sub.id }, current)
-}
-
-/** Best effort: an email failure must not make Stripe re-deliver the event. */
-async function sendThankYouEmail(session: Stripe.Checkout.Session) {
-  const email = session.customer_details?.email
-  if (!email) return
-  try {
-    const result = await emailService.sendThankYouEmail({
-      customerEmail: email,
-      customerName: session.customer_details?.name ?? undefined,
-    })
-    if (!result.success) console.error("[webhook] Thank-you email not sent", { sessionId: session.id })
-  } catch (err) {
-    console.error("[webhook] Thank-you email failed", { sessionId: session.id }, err)
-  }
 }
 
 /** Postgres "undefined table" / PostgREST "table not in schema cache". */

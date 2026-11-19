@@ -82,7 +82,6 @@
     "remark-breaks": "^4.0.0",
     "remark-gfm": "^4.0.1",
     "remark-math": "^6.0.0",
-    "resend": "^4.5.2",
     "sharp": "^0.34.2",
     "stripe": "^18.0.0",
     "tailwind-merge": "^2.5.5",

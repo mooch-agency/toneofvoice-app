@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { beforeEach, expect, it, vi } from "vitest"
-import { fakeSupabase, type FakeQuery } from "@/supabase/testing/fake-client"
+import { fakeSupabase, type FakeQuery } from "@/test/supabase-fake"
 
 const h = vi.hoisted(() => ({ userClient: null as unknown, MissingSupabaseConfigError: class extends Error {} }))
 vi.mock("@/lib/supabase-server", () => ({

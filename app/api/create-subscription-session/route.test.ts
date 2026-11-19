@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { beforeEach, describe, expect, it, vi } from "vitest"
-import { fakeSupabase } from "@/supabase/testing/fake-client"
+import { fakeSupabase } from "@/test/supabase-fake"
 import { resetRateLimits } from "@/lib/rate-limit"
 
 const h = vi.hoisted(() => ({

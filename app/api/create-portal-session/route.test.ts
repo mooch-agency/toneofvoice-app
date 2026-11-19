@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { beforeEach, expect, it, vi } from "vitest"
-import { fakeSupabase } from "@/supabase/testing/fake-client"
+import { fakeSupabase } from "@/test/supabase-fake"
 
 const h = vi.hoisted(() => ({
   stripe: { billingPortal: { sessions: { create: vi.fn() } } },

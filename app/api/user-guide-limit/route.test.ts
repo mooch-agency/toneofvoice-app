@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { beforeEach, expect, it, vi } from "vitest"
-import { fakeSupabase } from "@/supabase/testing/fake-client"
+import { fakeSupabase } from "@/test/supabase-fake"
 import { TIER_LIMITS } from "@/lib/tiers"
 
 const h = vi.hoisted(() => ({ userClient: null as unknown, MissingSupabaseConfigError: class extends Error {} }))
