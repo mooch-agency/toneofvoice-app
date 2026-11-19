@@ -31,13 +31,18 @@ interface SavePayload {
 }
 
 const SAVE_URL = "/api/save-style-guide"
+/** Browsers reject keepalive requests with bodies over 64 KB (total in flight). */
+const KEEPALIVE_MAX_BYTES = 60_000
 
 function post(payload: SavePayload, init: RequestInit = {}) {
+  const body = JSON.stringify(payload)
   return fetch(SAVE_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    body,
     ...init,
+    // A large guide is sent without keepalive: it still completes on in-app navigation.
+    ...(init.keepalive && { keepalive: new Blob([body]).size <= KEEPALIVE_MAX_BYTES }),
   })
 }
 

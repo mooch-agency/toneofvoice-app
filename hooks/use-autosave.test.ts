@@ -76,6 +76,13 @@ describe("useAutosave", () => {
     expect(JSON.parse(fetchMock.mock.calls[0][1].body).content_md).toBe("## About\n\nv1")
   })
 
+  it("flushes large guides without keepalive (browsers cap keepalive bodies at 64 KB)", async () => {
+    const { unmount } = setup({ content: "x".repeat(70_000) })
+    unmount()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(fetchMock.mock.calls[0][1].keepalive).toBe(false)
+  })
+
   it("does not save again on unmount when nothing is pending", async () => {
     const { unmount } = setup()
     await act(async () => vi.advanceTimersByTime(2000))
