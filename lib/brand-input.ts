@@ -1,0 +1,91 @@
+import { z } from "zod"
+import { traitNames } from "./traits"
+
+/**
+ * One server-side schema for the brand details sent to the generation routes
+ * (AI-13, SIMP-15). Fields the user controls are validated strictly; lists the
+ * model generated (keywords, products) and the audience hint are cleaned and
+ * capped instead of rejected, so a long model answer never blocks a user.
+ * Unknown fields (for example a client-supplied `previewTraits`) are dropped.
+ */
+
+const MAX_TRAITS = 3
+
+const Traits = z.preprocess(
+  (v) => (v === undefined || v === null ? [] : Array.isArray(v) ? traitNames(v) : v),
+  z
+    .array(z.string().max(40, "Trait names must be 40 characters or less"))
+    .max(MAX_TRAITS, `Choose at most ${MAX_TRAITS} traits`),
+)
+
+function cleanList(maxItems: number, maxLength: number) {
+  return z.preprocess(
+    (v) =>
+      (Array.isArray(v) ? v : [])
+        .filter((item): item is string => typeof item === "string")
+        .map((item) => item.trim())
+        .filter((item) => item && item.length <= maxLength)
+        .slice(0, maxItems),
+    z.array(z.string()),
+  )
+}
+
+function withLegacyDescription(raw: unknown): unknown {
+  if (!raw || typeof raw !== "object") return raw
+  const r = raw as Record<string, unknown>
+  if (r.brandDetailsDescription) return r
+  return { ...r, brandDetailsDescription: r.description ?? r.brandDetailsText }
+}
+
+export const BrandDetailsInput = z.preprocess(
+  withLegacyDescription,
+  z.object({
+    name: z
+      .string({ error: "Brand name is required" })
+      .trim()
+      .min(1, "Brand name is required")
+      .max(80, "Brand name must be 80 characters or less"),
+    brandDetailsDescription: z
+      .string({ error: "Brand description is required" })
+      .trim()
+      .min(1, "Brand description is required")
+      .max(2500, "Brand description must be 2500 characters or less"),
+    audience: z.preprocess((v) => (typeof v === "string" ? v.trim().slice(0, 500) : ""), z.string()),
+    traits: Traits,
+    keywords: cleanList(25, 40),
+    productsServices: cleanList(20, 80),
+    formalityLevel: z.string().trim().min(1).max(40).catch("Neutral"),
+    readingLevel: z.string().trim().min(1).max(20).catch("6-8"),
+    englishVariant: z.enum(["american", "british"]).catch("american"),
+  }),
+)
+
+export type BrandDetails = z.output<typeof BrandDetailsInput>
+
+export type ParseResult<T> = { ok: true; data: T } | { ok: false; error: string }
+
+function firstError(error: z.ZodError): string {
+  const issue = error.issues[0]
+  return issue?.message || "Invalid brand details"
+}
+
+export function parseBrandDetails(input: unknown): ParseResult<BrandDetails> {
+  if (!input || typeof input !== "object") return { ok: false, error: "Brand details are required" }
+  const result = BrandDetailsInput.safeParse(input)
+  return result.success ? { ok: true, data: result.data } : { ok: false, error: firstError(result.error) }
+}
+
+const PreviewBody = z.object({
+  brandDetails: z.record(z.string(), z.unknown(), { error: "Brand details are required" }),
+  selectedTraits: Traits.optional(),
+})
+
+/** Body of POST /api/preview: `{ brandDetails, selectedTraits? }`. selectedTraits wins when non-empty. */
+export function parsePreviewRequest(body: unknown): ParseResult<BrandDetails> {
+  const outer = PreviewBody.safeParse(body ?? {})
+  if (!outer.success) return { ok: false, error: firstError(outer.error) }
+  const selected = outer.data.selectedTraits ?? []
+  const details = parseBrandDetails(outer.data.brandDetails)
+  if (!details.ok) return details
+  return { ok: true, data: { ...details.data, traits: selected.length ? selected : details.data.traits } }
+}
