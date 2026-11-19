@@ -15,6 +15,7 @@ import {
 import { useState } from "react"
 import { useRouter } from "next/navigation"
 import { useToast } from "@/hooks/use-toast"
+import { clearAutoSaveBlocks } from "./AutoSaveGuide"
 import { Loader2 } from "lucide-react"
 
 interface GuideCardProps {
@@ -83,7 +84,8 @@ export function GuideCard({ id, title, updatedAt, faviconUrl }: GuideCardProps) 
         description: "Your tone of voice guide has been permanently deleted.",
       })
 
-      // Refresh the page to update the list
+      // A slot is free again, so a draft blocked at the guide limit may now save.
+      clearAutoSaveBlocks()
       router.refresh()
     } catch (error) {
       console.error("Delete error:", error)

@@ -18,7 +18,7 @@ vi.mock("@/lib/supabase-browser", () => ({
     },
   }),
 }))
-vi.mock("@/lib/mixpanel", () => ({ identify: vi.fn() }))
+vi.mock("@/lib/mixpanel", () => ({ identify: vi.fn(), reset: vi.fn() }))
 vi.mock("mixpanel-browser", () => ({ default: { register: vi.fn(), stop_session_recording: vi.fn() } }))
 
 import { AuthProvider } from "./AuthProvider"
