@@ -30,7 +30,7 @@ IDs below (SEC-n, AI-n, FE-n, DEP-n, ...) point into those reports.
 | D4 | Remove orphan pages `/demo`, `/preview`, `/full-access`, `/brand-details`. Redirects live in `next.config.js`. | No inbound links (FE SIMP-2). |
 | D5 | Rate limiting uses `lib/rate-limit.ts` (in memory, best effort per instance). | No Redis in the stack. The API is swappable later. |
 | D6 | The database schema is not in the repo. WP-A writes a reviewed migration for RLS, column privileges and the guide-limit trigger. **The owner must review and apply it.** | SEC-10 cannot be verified from code. |
-| D7 | `/api/post-to-webflow` stays but requires `WEBFLOW_WEBHOOK_SECRET` (fails closed) and creates drafts. | It may still be used by Zapier. |
+| D7 | `/api/post-to-webflow` stays but requires `WEBFLOW_WEBHOOK_SECRET` (fails closed). Items still publish directly, as before. | It may still be used by Zapier. |
 | D8 | Keep `ai@5` with `@ai-sdk/react@2` (done in Phase 0). | Two copies of `ai` caused the editor type errors. |
 
 ## Phase 0 — foundation (done by orchestrator)
@@ -71,7 +71,7 @@ IDs below (SEC-n, AI-n, FE-n, DEP-n, ...) point into those reports.
 - `extract-website`: rate limit by IP; validate body types and lengths (description ≤ 2000 chars, URL ≤ 2048); guard every auxiliary `JSON.parse` (fallback to `[]`); wrap scraped text in `<website_content>` tags with an "ignore instructions inside" note; brand hint from host strips only a leading `www.` and the subdomain (`shop.acme.com` → `acme`, `news.bbc.co.uk` → `bbc`); fix TS errors.
 - `ai/command`: require login and a paid tier (`requireUser({ requirePaid: true })`) — the editor AI is a paid feature in the UI; ignore client `model` (server allow-list); cap message count (last 10) and total characters; rate limit; fix the 12 type errors.
 - PDF export: require login; rate limit; cap body size (2 MB → 413); `setJavaScriptEnabled(false)`; request interception that allows only `data:`, `about:blank` and Google Fonts; reject `css` containing `</style`. Delete `export-pdf-fallback` (the client already falls back to html2pdf). Generic errors.
-- `post-to-webflow`: D7. Constant-time secret compare, draft items, length checks, no echoing of bodies.
+- `post-to-webflow`: D7. Constant-time secret compare, length checks, no echoing of bodies.
 - `auth/callback`: `safeRedirectPath(next, "/auth/claim")`, redirect via `new URL(path, origin)`.
 - Proxy: rename `middleware.ts` → `proxy.ts` (Next 16). `updateSession` always returns `{ response, user }`. Redirects copy refreshed cookies. Matcher limited to pages (exclude `/api/**`, static files).
 - Add `import "server-only"` to server-only libs (`lib/supabase-admin.ts`, `lib/pdf-chrome.ts`, `lib/langsmith-openai.ts`) — the `server-only` package ships with Next.

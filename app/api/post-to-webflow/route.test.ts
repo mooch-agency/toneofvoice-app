@@ -63,7 +63,7 @@ describe("POST /api/post-to-webflow auth", () => {
 describe("POST /api/post-to-webflow with the secret", () => {
   const auth = `Bearer ${SECRET}`
 
-  it("creates a draft item and returns only the id and slug", async () => {
+  it("publishes the item as before and returns only the id and slug", async () => {
     const res = await POST(req(VALID, auth))
     expect(res.status).toBe(200)
     expect(await res.json()).toEqual({ success: true, id: "item1", slug: "hello-world" })
@@ -72,7 +72,7 @@ describe("POST /api/post-to-webflow with the secret", () => {
     const [url, init] = fetchMock.mock.calls[0]
     expect(url).toBe("https://api.webflow.com/v2/sites/site1/collections/coll1/items")
     const sent = JSON.parse(init.body)
-    expect(sent.isDraft).toBe(true)
+    expect(sent.isDraft).toBe(false)
     expect(sent.fieldData).toMatchObject({
       name: "Hello world",
       slug: "hello-world",

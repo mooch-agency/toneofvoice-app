@@ -4,7 +4,7 @@ import { NextResponse } from "next/server"
 /**
  * Zapier -> Webflow CMS blog publishing. Requires
  * `Authorization: Bearer ${WEBFLOW_WEBHOOK_SECRET}` and fails closed when the
- * secret is unset. Items are created as drafts so a human publishes them.
+ * secret is unset. Items are published directly, as before.
  */
 
 const LOCATION = "Lisbon"
@@ -84,7 +84,7 @@ export async function POST(req: Request) {
         headers: { Authorization: `Bearer ${WEBFLOW_TOKEN}`, "Content-Type": "application/json" },
         body: JSON.stringify({
           isArchived: false,
-          isDraft: true,
+          isDraft: false,
           fieldData: {
             name: post.title,
             slug: post.slug,
