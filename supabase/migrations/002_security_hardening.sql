@@ -7,8 +7,9 @@
 -- into a scratch branch), and apply it to a staging project before production.
 --
 -- What it does (all statements are idempotent):
---   1. profiles: RLS on; users can read only their own row; users (anon and
---      authenticated) lose INSERT/UPDATE/DELETE. Billing columns are written
+--   1. profiles: RLS on; every existing policy on profiles and style_guides is
+--      dropped first; users can read only their own row; anon cannot read;
+--      users (anon and authenticated) lose INSERT/UPDATE/DELETE. Billing columns are written
 --      only by the service role (Stripe webhook, verify-subscription).
 --      Rows are created by the existing new-user trigger (runs as its owner),
 --      which this does not affect.
@@ -31,18 +32,31 @@ begin;
 -- 1. profiles
 -- -----------------------------------------------------------------------------
 alter table public.profiles enable row level security;
+alter table public.style_guides enable row level security;
 
-drop policy if exists "profiles_select_own" on public.profiles;
+-- Policies are permissive (OR-ed together), so one leftover policy such as the
+-- Supabase template's "Public profiles are viewable by everyone." would undo
+-- everything below. Drop every existing policy on both tables, then recreate
+-- only the owner-only ones.
+do $$
+declare
+  p record;
+begin
+  for p in
+    select policyname, tablename from pg_policies
+    where schemaname = 'public' and tablename in ('profiles', 'style_guides')
+  loop
+    execute format('drop policy %I on public.%I', p.policyname, p.tablename);
+  end loop;
+end
+$$;
+
 create policy "profiles_select_own" on public.profiles
   for select to authenticated
   using (id = auth.uid());
 
--- Remove any older write policies (names vary; these are common defaults).
-drop policy if exists "profiles_update_own" on public.profiles;
-drop policy if exists "Users can update own profile." on public.profiles;
-drop policy if exists "Users can update their own profile" on public.profiles;
-drop policy if exists "Users can insert their own profile." on public.profiles;
-drop policy if exists "Users can insert their own profile" on public.profiles;
+-- Anonymous visitors never read profiles.
+revoke select on public.profiles from anon;
 
 -- A column-level REVOKE does not override a table-level grant, so revoke the
 -- table-level write privileges. Nothing in the app writes profiles with a user
@@ -52,25 +66,19 @@ revoke insert, update, delete on public.profiles from anon, authenticated;
 -- -----------------------------------------------------------------------------
 -- 2. style_guides: owner-only access
 -- -----------------------------------------------------------------------------
-alter table public.style_guides enable row level security;
-
-drop policy if exists "style_guides_select_own" on public.style_guides;
 create policy "style_guides_select_own" on public.style_guides
   for select to authenticated
   using (user_id = auth.uid());
 
-drop policy if exists "style_guides_insert_own" on public.style_guides;
 create policy "style_guides_insert_own" on public.style_guides
   for insert to authenticated
   with check (user_id = auth.uid());
 
-drop policy if exists "style_guides_update_own" on public.style_guides;
 create policy "style_guides_update_own" on public.style_guides
   for update to authenticated
   using (user_id = auth.uid())
   with check (user_id = auth.uid());
 
-drop policy if exists "style_guides_delete_own" on public.style_guides;
 create policy "style_guides_delete_own" on public.style_guides
   for delete to authenticated
   using (user_id = auth.uid());

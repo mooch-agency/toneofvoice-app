@@ -5,6 +5,7 @@ import {
   readPendingDraft,
   savePendingDraft,
   stampDraft,
+  storePreview,
 } from "./pending-draft"
 
 const brand = { name: "Acme", brandDetailsDescription: "We make anvils." }
@@ -41,15 +42,25 @@ describe("readPendingDraft", () => {
     expect(localStorage.getItem("brandDetails")).toBeNull()
   })
 
-  it("ignores an unstamped draft", () => {
+  it("accepts an unstamped draft from before stamping existed, and stamps it", () => {
     seed()
-    expect(readPendingDraft()).toBeNull()
+    expect(readPendingDraft()).not.toBeNull()
+    expect(localStorage.getItem(DRAFT_STAMP_KEY)).toBe(String(Date.now()))
   })
 
   it("ignores corrupt brand details", () => {
     seed({ stampedAgoMs: 0 })
     localStorage.setItem("brandDetails", "{not json")
     expect(readPendingDraft()).toBeNull()
+  })
+})
+
+describe("storePreview", () => {
+  it("saves the preview and refreshes the draft time", () => {
+    localStorage.setItem(DRAFT_STAMP_KEY, "1")
+    storePreview("## About\n\nNew")
+    expect(localStorage.getItem("previewContent")).toBe("## About\n\nNew")
+    expect(localStorage.getItem(DRAFT_STAMP_KEY)).toBe(String(Date.now()))
   })
 })
 

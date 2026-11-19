@@ -6,6 +6,7 @@ import { useToast } from "@/hooks/use-toast"
 import { getUserFriendlyError } from "@/lib/api-utils"
 import { track as mpTrack } from "@/lib/mixpanel"
 import type { BrandDetails } from "@/hooks/use-guide"
+import { stampDraft, storePreview } from "@/lib/pending-draft"
 
 function readJson<T>(key: string): T | null {
   try {
@@ -65,6 +66,7 @@ export function usePreviewGeneration({ enabled, generate, onLoad }: UsePreviewGe
 
     const cached = localStorage.getItem("previewContent")
     if (cached && !generate) {
+      stampDraft()
       loadedRef.current = true
       onLoadRef.current(cached, brand)
       setLoading(false)
@@ -88,7 +90,7 @@ export function usePreviewGeneration({ enabled, generate, onLoad }: UsePreviewGe
         const data: { preview?: string; error?: string } = await res.json().catch(() => ({}))
         if (!res.ok || !data.preview) throw new Error(data.error || `Preview failed (${res.status})`)
 
-        localStorage.setItem("previewContent", data.preview)
+        storePreview(data.preview)
         mpTrack("Guide Generated", { plan: "preview" })
         loadedRef.current = true
         setProgress(100)

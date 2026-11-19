@@ -44,6 +44,15 @@ describe("usePreviewGeneration", () => {
     expect(result.current.loading).toBe(false)
   })
 
+  it("refreshes the draft time when a cached preview is opened (visitor is active)", async () => {
+    localStorage.setItem("brandDetails", JSON.stringify(brand))
+    localStorage.setItem("previewContent", "## About\n\nCached.")
+    localStorage.setItem("draftCreatedAt", "1")
+    renderHook(() => usePreviewGeneration({ enabled: true, generate: false, onLoad }))
+    await waitFor(() => expect(onLoad).toHaveBeenCalled())
+    expect(Number(localStorage.getItem("draftCreatedAt"))).toBeGreaterThan(1)
+  })
+
   it("generates a fresh preview, stores it and cleans the URL", async () => {
     localStorage.setItem("brandDetails", JSON.stringify(brand))
     localStorage.setItem("selectedTraits", JSON.stringify(["Bold"]))
@@ -53,6 +62,7 @@ describe("usePreviewGeneration", () => {
     await waitFor(() => expect(onLoad).toHaveBeenCalledWith("## About\n\nNew.", brand))
     expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ brandDetails: brand, selectedTraits: ["Bold"] })
     expect(localStorage.getItem("previewContent")).toBe("## About\n\nNew.")
+    expect(Number(localStorage.getItem("draftCreatedAt"))).toBeGreaterThan(0)
     expect(replace).toHaveBeenCalledWith("/guide", { scroll: false })
   })
 

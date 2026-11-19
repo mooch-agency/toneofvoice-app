@@ -22,6 +22,16 @@ export function stampDraft() {
   }
 }
 
+/** Save the preview guide locally and refresh the draft time (the visitor is active). */
+export function storePreview(markdown: string) {
+  try {
+    localStorage.setItem("previewContent", markdown)
+  } catch {
+    return
+  }
+  stampDraft()
+}
+
 function clearDraft() {
   for (const key of ["brandDetails", "previewContent", DRAFT_STAMP_KEY]) localStorage.removeItem(key)
 }
@@ -33,8 +43,11 @@ export function readPendingDraft(): PendingDraft | null {
     const previewContent = localStorage.getItem("previewContent")
     if (!raw || !previewContent) return null
 
-    const stamp = Number(localStorage.getItem(DRAFT_STAMP_KEY))
-    if (!stamp || Date.now() - stamp > DRAFT_MAX_AGE_MS) {
+    const rawStamp = localStorage.getItem(DRAFT_STAMP_KEY)
+    if (rawStamp === null) {
+      // Draft from before stamping existed: keep it and start its clock now.
+      stampDraft()
+    } else if (Date.now() - Number(rawStamp) > DRAFT_MAX_AGE_MS || !Number(rawStamp)) {
       clearDraft()
       return null
     }
