@@ -6,12 +6,13 @@ import { fakeSupabase, type FakeHandler } from "@/test/supabase-fake"
 const h = vi.hoisted(() => ({
   StripeCtor: vi.fn(),
   admin: null as unknown,
+  subscriptions: { retrieve: vi.fn(), update: vi.fn() },
 }))
 
 vi.mock("stripe", () => ({
   default: function Stripe(this: unknown, ...args: unknown[]) {
     h.StripeCtor(...args)
-    return { marker: args[0] }
+    return { marker: args[0], subscriptions: h.subscriptions }
   },
 }))
 vi.mock("@/lib/supabase-admin", () => ({ getSupabaseAdmin: () => h.admin }))
@@ -21,7 +22,10 @@ import {
   StripeNotConfiguredError,
   NoProfileMatchedError,
   applySubscriptionToProfile,
+  changeSubscriptionPlan,
+  currentPlan,
   getStripe,
+  isUpgrade,
   planToPriceId,
   priceIdToPlan,
   profileUpdateFromSubscription,
@@ -212,5 +216,81 @@ describe("applySubscriptionToProfile", () => {
   it("throws when the database returns an error", async () => {
     useAdmin(() => ({ error: { message: "boom" } }))
     await expect(applySubscriptionToProfile({ userId: "u1" }, sub())).rejects.toThrow()
+  })
+})
+
+describe("changeSubscriptionPlan", () => {
+  beforeEach(() => {
+    process.env.STRIPE_SECRET_KEY = "sk_live_x"
+    process.env.STRIPE_PRO_PRICE_ID = "price_pro"
+    process.env.STRIPE_AGENCY_PRICE_ID = "price_agency"
+    h.subscriptions.retrieve.mockReset().mockResolvedValue(
+      sub({
+        metadata: { user_id: "u1", plan: "pro" },
+        items: { data: [{ id: "si_1", price: { id: "price_pro" } }] },
+      }),
+    )
+    h.subscriptions.update.mockReset().mockImplementation(async (id: string) =>
+      sub({ id, items: { data: [{ id: "si_1", price: { id: "price_agency" } }] } }),
+    )
+  })
+
+  it("swaps the item's price, charges the prorated difference now and keeps metadata", async () => {
+    const updated = await changeSubscriptionPlan("sub_1", "agency")
+    expect(h.subscriptions.retrieve).toHaveBeenCalledWith("sub_1")
+    expect(h.subscriptions.update).toHaveBeenCalledWith("sub_1", {
+      items: [{ id: "si_1", price: "price_agency" }],
+      proration_behavior: "always_invoice",
+      payment_behavior: "error_if_incomplete",
+      metadata: { user_id: "u1", plan: "agency" },
+    })
+    expect(updated.items.data[0].price.id).toBe("price_agency")
+  })
+
+  it("throws StripeNotConfiguredError when the target price is missing", async () => {
+    delete process.env.STRIPE_AGENCY_PRICE_ID
+    await expect(changeSubscriptionPlan("sub_1", "agency")).rejects.toBeInstanceOf(StripeNotConfiguredError)
+    expect(h.subscriptions.update).not.toHaveBeenCalled()
+  })
+
+  it("throws when the subscription has no item", async () => {
+    h.subscriptions.retrieve.mockResolvedValue(sub({ items: { data: [] } }))
+    await expect(changeSubscriptionPlan("sub_1", "agency")).rejects.toThrow(/item/i)
+    expect(h.subscriptions.update).not.toHaveBeenCalled()
+  })
+
+  it("passes Stripe errors (e.g. a declined card) through", async () => {
+    const declined = Object.assign(new Error("Your card was declined."), { type: "StripeCardError" })
+    h.subscriptions.update.mockRejectedValue(declined)
+    await expect(changeSubscriptionPlan("sub_1", "agency")).rejects.toBe(declined)
+  })
+})
+
+describe("currentPlan / isUpgrade", () => {
+  beforeEach(() => {
+    process.env.STRIPE_PRO_PRICE_ID = "price_pro"
+    process.env.STRIPE_AGENCY_PRICE_ID = "price_agency"
+  })
+  const withPrice = (id: string) => sub({ items: { data: [{ price: { id } }] } })
+
+  it("reads the plan from the subscription's price", () => {
+    expect(currentPlan(withPrice("price_agency"), "pro")).toBe("agency")
+  })
+
+  it("falls back to a paid profile tier for an unknown price", () => {
+    expect(currentPlan(withPrice("price_legacy"), "pro")).toBe("pro")
+    expect(currentPlan(withPrice("price_legacy"), "team")).toBe("agency")
+  })
+
+  it("is unknown (null) when neither tells a paid plan", () => {
+    expect(currentPlan(withPrice("price_legacy"), "starter")).toBeNull()
+    expect(currentPlan(sub({ items: { data: [] } }), null)).toBeNull()
+  })
+
+  it("only pro -> agency is an upgrade; unknown never is", () => {
+    expect(isUpgrade("pro", "agency")).toBe(true)
+    expect(isUpgrade("agency", "agency")).toBe(false)
+    expect(isUpgrade("agency", "pro")).toBe(false)
+    expect(isUpgrade(null, "agency")).toBe(false)
   })
 })

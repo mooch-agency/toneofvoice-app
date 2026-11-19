@@ -18,7 +18,7 @@ import { hasUnlockPlaceholders } from "@/lib/guide-placeholders"
 import { storePreview } from "@/lib/pending-draft"
 import { MetaPixel } from "@/lib/meta-pixel"
 import { isPaidTier } from "@/lib/tiers"
-import { isPaidPlan, useCheckout } from "./_hooks/use-checkout"
+import { isPaidPlan, useCheckout, type PaidPlan } from "./_hooks/use-checkout"
 import { useExpandGuide } from "./_hooks/use-expand-guide"
 import { useGuideExport, type ExportFormat } from "./_hooks/use-guide-export"
 import { usePreviewGeneration } from "./_hooks/use-preview-generation"
@@ -158,12 +158,24 @@ function GuideContent() {
   }
 
   // Checkout: after sign-up the user lands on /guide?subscribe=<plan>.
-  const { processingPlan, startCheckout } = useCheckout()
+  // Existing subscribers choosing a higher plan in the payment dialog are upgraded in place.
+  const onUpgraded = useCallback(
+    (newTier: PaidPlan) => {
+      setSubscriptionTier(newTier)
+      setPaymentOpen(false)
+    },
+    [setSubscriptionTier]
+  )
+  const { processingPlan, startCheckout } = useCheckout({
+    onUpgraded,
+    onNeedsConfirmation: () => setPaymentOpen(true),
+  })
   const subscribeTriggered = useRef(false)
   useEffect(() => {
     if (!isPaidPlan(subscribePlan) || !user || subscribeTriggered.current) return
     subscribeTriggered.current = true
-    startCheckout(subscribePlan)
+    // From a link, not a click: an upgrade (immediate charge) must be confirmed in the dialog.
+    startCheckout(subscribePlan, { confirmed: false })
     router.replace("/guide", { scroll: false })
   }, [subscribePlan, user, startCheckout, router])
 

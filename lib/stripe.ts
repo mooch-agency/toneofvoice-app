@@ -8,7 +8,7 @@ import { NextResponse } from "next/server"
 import Stripe from "stripe"
 import { withRouteErrors } from "@/lib/api-auth"
 import { getSupabaseAdmin } from "@/lib/supabase-admin"
-import { effectiveTier, guideLimit, type Tier } from "@/lib/tiers"
+import { effectiveTier, guideLimit, isUnlocked, normalizeTier, type Tier } from "@/lib/tiers"
 
 /** Must match the installed SDK (stripe@18). Set the webhook endpoint to the same version. */
 export const STRIPE_API_VERSION = "2025-03-31.basil" satisfies Stripe.LatestApiVersion
@@ -69,6 +69,22 @@ export function priceIdToPlan(priceId: string | null | undefined): PaidPlan | nu
   if (priceId === PRICE_IDS.pro) return "pro"
   if (priceId === PRICE_IDS.agency) return "agency"
   return null
+}
+
+/**
+ * The paid plan a subscription is on: from its price, else from the stored
+ * profile tier (legacy prices). Null when neither says.
+ */
+export function currentPlan(sub: Stripe.Subscription, profileTier: string | null | undefined): PaidPlan | null {
+  const fromPrice = priceIdToPlan(sub.items?.data?.[0]?.price?.id)
+  if (fromPrice) return fromPrice
+  const tier = normalizeTier(profileTier)
+  return isPaidPlan(tier) ? tier : null
+}
+
+/** Whether moving from `from` to `to` is an upgrade. An unknown current plan never is. */
+export function isUpgrade(from: PaidPlan | null, to: PaidPlan): boolean {
+  return from !== null && !isUnlocked(from, to)
 }
 
 export function appUrl(): string {
@@ -208,4 +224,28 @@ export async function findSubscription(
 ): Promise<Stripe.Subscription | null> {
   const list = await getStripe().subscriptions.list({ customer: customerId, status: "all", limit: 10 })
   return list.data.find((s) => statuses.has(s.status)) ?? null
+}
+
+/**
+ * Move a subscription to another plan in place (same subscription, same
+ * customer). The prorated difference is invoiced and charged right away, and
+ * the update fails instead of leaving the subscription incomplete when that
+ * payment fails, so a declined card surfaces as a Stripe error (402).
+ * Callers decide which changes are allowed (the app only upgrades in-app).
+ */
+export async function changeSubscriptionPlan(subscriptionId: string, plan: PaidPlan): Promise<Stripe.Subscription> {
+  const priceId = planToPriceId(plan)
+  if (!priceId) throw new StripeNotConfiguredError()
+
+  const stripe = getStripe()
+  const current = await stripe.subscriptions.retrieve(subscriptionId)
+  const itemId = current.items?.data?.[0]?.id
+  if (!itemId) throw new Error(`Subscription ${subscriptionId} has no item to change`)
+
+  return stripe.subscriptions.update(subscriptionId, {
+    items: [{ id: itemId, price: priceId }],
+    proration_behavior: "always_invoice",
+    payment_behavior: "error_if_incomplete",
+    metadata: { ...(current.metadata ?? {}), plan },
+  })
 }

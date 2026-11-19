@@ -79,6 +79,9 @@ export function PaymentDialog({
           <DialogTitle className="text-base sm:text-xl">Get your full tone of voice guide</DialogTitle>
           <DialogDescription className="text-xs sm:text-base">Subscribe to unlock all rules, editing, and exports</DialogDescription>
         </DialogHeader>
+        <p className="text-xs text-muted-foreground">
+          Already on Pro? Choosing Agency upgrades your current plan and charges the prorated difference today.
+        </p>
 
         <div className="mt-4 grid gap-4 sm:grid-cols-2">
           {plans.map(({ id, tier }) => (

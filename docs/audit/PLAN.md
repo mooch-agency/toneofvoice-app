@@ -54,7 +54,7 @@ IDs below (SEC-n, AI-n, FE-n, DEP-n, ...) point into those reports.
 - `applySubscriptionToProfile(userId, subscription)`: plan from price, status from subscription. Unknown price: log an error and leave the tier untouched. Used by the webhook and verify-subscription.
 - Webhook: return 500 when a handler fails so Stripe retries; 0 updated rows is a failure; dedupe by `event.id` (table `stripe_events` in the migration; if the insert fails because the table is missing, log and continue). Delete the `mode: "payment"` branch and the in-memory email dedupe.
 - `verify-subscription`: accept `{ session_id }`, retrieve that session, check `metadata.user_id === user.id`, `status === "complete"` and the subscription's status is active/trialing. Never write with the user's own client. Without a `session_id`, look up by the profile's `stripe_customer_id` (`subscriptions.list({ customer })`).
-- `create-subscription-session`: reuse `stripe_customer_id` as `customer`. If the user already has an active subscription, do not create a checkout: return `409 { error, manageUrl }` with a billing-portal URL. `success_url` = `/dashboard?subscription=success&session_id={CHECKOUT_SESSION_ID}`. Rate limit.
+- `create-subscription-session`: reuse `stripe_customer_id` as `customer`. If the user already has an active subscription, do not create a checkout: return `409 { error, manageUrl }` with a billing-portal URL, or `409 { error, upgrade: true }` when an active subscriber asks for a higher plan (the client then calls `POST /api/change-plan`). `success_url` = `/dashboard?subscription=success&session_id={CHECKOUT_SESSION_ID}`. Rate limit.
 - `save-style-guide`: use `lib/tiers`. At the limit, return 403 for every tier. Never overwrite another guide. Generic errors. Validate field types and cap `content_md` size (e.g. 200 KB).
 - `user-guide-limit`, `user-subscription-tier`, `load-style-guide`, dashboard pages and billing UI copy: use `lib/tiers` (`TIER_LIMITS`, `effectiveTier`).
 - `SubscriptionRefresh`: pass `session_id` from the URL to verify-subscription.
@@ -102,7 +102,7 @@ IDs below (SEC-n, AI-n, FE-n, DEP-n, ...) point into those reports.
 - Split the page: `use-autosave` (debounce, flush on unmount with `keepalive`, abort previous request, real plan type, status), export hook/module using `lib/export-markdown.ts` and `downloadFile`, components for progress and dialogs. Target: page under ~600 lines.
 - `use-guide`: tier from `/api/load-style-guide` or a fresh fetch per mount; use `isUnlocked` from `lib/tiers`; "Add section" goes through the content-change path.
 - `AutoSaveGuide`/claim: on 403 tell the user (toast/nudge) and stop retrying.
-- Handle the new API contracts: `expand-style-guide` 502 `{ failedSections }`, 409; `create-subscription-session` 409 `{ manageUrl }` (open the portal URL).
+- Handle the new API contracts: `expand-style-guide` 502 `{ failedSections }`, 409; `create-subscription-session` 409 `{ manageUrl }` (open the portal URL) or 409 `{ upgrade: true }` (call `POST /api/change-plan`).
 - Editor list transforms use classic list plugins (FE-11). Links: only `http(s):`/`mailto:` (FE-16).
 - DOCX: valid numbering config and real tables (AI-17).
 
@@ -132,5 +132,5 @@ Merge WP branches, run all gates and `next build`, run an independent review (`/
 - Review and apply `supabase/migrations/002_security_hardening.sql`.
 - Set `WEBFLOW_WEBHOOK_SECRET` (and in Zapier) if Webflow publishing is still used.
 - Set the Stripe webhook endpoint's API version to `2025-03-31.basil` (matches `lib/stripe.ts`) and subscribe it to `checkout.session.completed`, `customer.subscription.updated` and `customer.subscription.deleted`.
-- In Stripe Billing Portal settings, turn on plan switching between Pro and Agency. Upgrades and "manage" links go through the portal.
+- No portal plan-switching setting is needed: Pro → Agency upgrades happen in-app (`POST /api/change-plan`, prorated difference charged immediately). The Stripe Billing Portal ("Manage") is only used for managing payment details and cancelling. (Optional: enabling plan switching there lets Agency users downgrade to Pro without cancelling; nothing in the app depends on it.)
 - Rotate the old `ADMIN_BLOG_PASSWORD` wherever it is reused (SEC-19). The deleted `docs/SECURITY_REVIEW.md` held it in plain text, so it is still in git history.

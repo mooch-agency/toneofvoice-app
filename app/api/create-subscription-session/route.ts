@@ -3,19 +3,24 @@ import { requireUser, tooManyRequests } from "@/lib/api-auth"
 import { clientKey, rateLimit } from "@/lib/rate-limit"
 import { getSupabaseAdmin } from "@/lib/supabase-admin"
 import {
+  ACTIVE_STATUSES,
   LIVE_STATUSES,
   appUrl,
+  currentPlan,
   findSubscription,
   getStripe,
   isPaidPlan,
+  isUpgrade,
   planToPriceId,
   withBillingErrors,
 } from "@/lib/stripe"
 
 /**
  * Stripe Checkout for a Pro or Agency subscription.
- * A user who already has a subscription gets 409 `{ error, manageUrl }`
- * (billing portal) instead of a second subscription.
+ * A user who already has a subscription never gets a second one:
+ * - an active subscriber asking for a higher plan gets 409 `{ error, upgrade: true }`
+ *   (the client then calls POST /api/change-plan);
+ * - otherwise (same/lower plan, or payment trouble) 409 `{ error, manageUrl }` (billing portal).
  */
 export async function POST(req: Request) {
   return withBillingErrors("create-subscription-session", async () => {
@@ -40,7 +45,7 @@ export async function POST(req: Request) {
 
     const { data: profile } = await supabase
       .from("profiles")
-      .select("stripe_customer_id")
+      .select("stripe_customer_id, subscription_tier")
       .eq("id", user.id)
       .single()
     const stripe = getStripe()
@@ -61,15 +66,25 @@ export async function POST(req: Request) {
         .update({ stripe_customer_id: customerId })
         .eq("id", user.id)
       if (error) throw new Error(`Could not store Stripe customer: ${error.message ?? "unknown"}`)
-    } else if (await findSubscription(customerId, LIVE_STATUSES)) {
-      const portal = await stripe.billingPortal.sessions.create({
-        customer: customerId,
-        return_url: `${base}/dashboard/billing`,
-      })
-      return NextResponse.json(
-        { error: "You already have a subscription. Change or manage it in the billing portal.", manageUrl: portal.url },
-        { status: 409 },
-      )
+    } else {
+      const existing = await findSubscription(customerId, LIVE_STATUSES)
+      if (existing) {
+        const current = currentPlan(existing, profile?.subscription_tier)
+        if (ACTIVE_STATUSES.has(existing.status) && isUpgrade(current, plan)) {
+          return NextResponse.json(
+            { error: "You already have a subscription. Upgrade it instead of starting a new one.", upgrade: true },
+            { status: 409 },
+          )
+        }
+        const portal = await stripe.billingPortal.sessions.create({
+          customer: customerId,
+          return_url: `${base}/dashboard/billing`,
+        })
+        return NextResponse.json(
+          { error: "You already have a subscription. Change or manage it in the billing portal.", manageUrl: portal.url },
+          { status: 409 },
+        )
+      }
     }
 
     const metadata = { user_id: user.id, plan }

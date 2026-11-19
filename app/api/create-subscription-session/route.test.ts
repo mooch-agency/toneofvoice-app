@@ -125,6 +125,61 @@ describe("checkout", () => {
     )
   })
 
+  it("pro subscriber asking for agency gets 409 { upgrade: true } (in-app upgrade, no portal)", async () => {
+    profile = { stripe_customer_id: "cus_1", subscription_tier: "pro" }
+    h.stripe.subscriptions.list.mockResolvedValue({
+      data: [{ id: "sub_1", status: "active", items: { data: [{ price: { id: "price_pro" } }] } }],
+    })
+    const res = await post({ plan: "agency" })
+    expect(res.status).toBe(409)
+    const body = await res.json()
+    expect(body.upgrade).toBe(true)
+    expect(body.error).toBeTruthy()
+    expect(body).not.toHaveProperty("manageUrl")
+    expect(h.stripe.billingPortal.sessions.create).not.toHaveBeenCalled()
+    expect(h.stripe.checkout.sessions.create).not.toHaveBeenCalled()
+  })
+
+  it("same plan keeps the portal link, without upgrade", async () => {
+    profile = { stripe_customer_id: "cus_1", subscription_tier: "pro" }
+    h.stripe.subscriptions.list.mockResolvedValue({
+      data: [{ id: "sub_1", status: "active", items: { data: [{ price: { id: "price_pro" } }] } }],
+    })
+    const body = await (await post({ plan: "pro" })).json()
+    expect(body.manageUrl).toBe("https://portal/x")
+    expect(body).not.toHaveProperty("upgrade")
+  })
+
+  it("agency subscriber asking for pro (downgrade) gets the portal link", async () => {
+    profile = { stripe_customer_id: "cus_1", subscription_tier: "agency" }
+    h.stripe.subscriptions.list.mockResolvedValue({
+      data: [{ id: "sub_1", status: "active", items: { data: [{ price: { id: "price_agency" } }] } }],
+    })
+    const res = await post({ plan: "pro" })
+    expect(res.status).toBe(409)
+    const body = await res.json()
+    expect(body.manageUrl).toBe("https://portal/x")
+    expect(body).not.toHaveProperty("upgrade")
+  })
+
+  it("falls back to the profile tier when the subscription price is unknown", async () => {
+    profile = { stripe_customer_id: "cus_1", subscription_tier: "pro" }
+    h.stripe.subscriptions.list.mockResolvedValue({
+      data: [{ id: "sub_1", status: "active", items: { data: [{ price: { id: "price_legacy" } }] } }],
+    })
+    expect((await (await post({ plan: "agency" })).json()).upgrade).toBe(true)
+  })
+
+  it("a past_due subscriber asking for a higher plan is sent to the portal, not upgraded", async () => {
+    profile = { stripe_customer_id: "cus_1", subscription_tier: "pro" }
+    h.stripe.subscriptions.list.mockResolvedValue({
+      data: [{ id: "sub_1", status: "past_due", items: { data: [{ price: { id: "price_pro" } }] } }],
+    })
+    const body = await (await post({ plan: "agency" })).json()
+    expect(body.manageUrl).toBe("https://portal/x")
+    expect(body).not.toHaveProperty("upgrade")
+  })
+
   it("also blocks a second checkout while the existing subscription is past_due", async () => {
     profile = { stripe_customer_id: "cus_1" }
     h.stripe.subscriptions.list.mockResolvedValue({ data: [{ id: "sub_1", status: "past_due" }] })
