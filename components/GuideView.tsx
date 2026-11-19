@@ -1,115 +1,199 @@
 "use client"
 
-import { RefObject, useEffect, useState } from "react"
+import { RefObject, type ReactNode } from "react"
+import dynamic from "next/dynamic"
 import { playfairDisplay } from "@/lib/fonts"
-import { Eye, PenLine } from "lucide-react"
 import { GuideCover } from "@/components/GuideCover"
-import { GuideEditor, type GuideEditorRef } from "@/components/editor/GuideEditor"
 import { ContentGate } from "@/components/ContentGate"
 import { MarkdownRenderer } from "@/components/MarkdownRenderer"
-import {
-  StyleGuideSection,
-  Tier,
-  buildEditableMarkdown,
-} from "@/lib/content-parser"
+import type { StyleGuideSection, Tier } from "@/lib/content-parser"
+import { buildEditorMarkdown, mergeEditedMarkdown } from "@/lib/editor-merge"
 import { cn } from "@/lib/utils"
+
+// The editor (Plate + AI kits) is only needed in edit mode; keep it out of read-only pages.
+const GuideEditor = dynamic(() => import("@/components/editor/GuideEditor").then((m) => m.GuideEditor), {
+  ssr: false,
+})
 
 export interface GuideViewProps {
   sections: StyleGuideSection[]
-  activeSectionId: string
   scrollContainerRef: RefObject<HTMLDivElement | null>
   viewMode: "preview" | "edit"
-  onModeSwitch: (mode: "preview" | "edit") => void
-  content: string
+  /** Called with the full guide markdown (locked sections kept in place) after an edit */
   onContentChange: (markdown: string) => void
-  /** Called when the user edits the H1 brand name on the cover */
+  /** Called when the user edits the H1 brand name in the editor */
   onBrandNameChange?: (name: string) => void
   brandName: string
-  guideType?: "core" | "complete" | "style_guide"
   showPreviewBadge?: boolean
   isUnlocked: (minTier?: Tier) => boolean
-  isSectionLocked: boolean
   onUpgrade: () => void
+  /** Change to remount the editor with fresh content */
   editorKey: number
-  editorRef: RefObject<GuideEditorRef | null>
-  storageKey: string
   editorId: string
-  /** Show edit mode toggle (true for preview always, true for full-access when paid) */
-  showEditTools: boolean
-  /** Optional banner above editor (e.g. "Style Guide Updated") */
-  editorBanner?: React.ReactNode
-  pdfFooter?: React.ReactNode
-  /** Optional class for the content wrapper (e.g. opacity when retrying) */
+  pdfFooter?: ReactNode
+  /** Optional class for the content wrapper */
   contentClassName?: string
   /** Key to force remount and trigger entrance animation (e.g. after expand) */
   contentKey?: string | number
-  /** Website URL to show on cover page (if available) */
   websiteUrl?: string
-  /** Subscription tier for branding visibility */
   subscriptionTier?: Tier
-  /** Enable AI features in editor (Cmd+J). Only for pro/agency users. */
+  /** Enable AI features in the editor (Cmd+J) */
   showAI?: boolean
-  /** Optional attribution note shown on the cover page (e.g. for sample guides) */
   coverDisclaimer?: string
-  /** Optional date string for the cover page (defaults to today) */
   coverDate?: string
 }
 
+const hasContent = (s: StyleGuideSection) => (s.content || "").trim().length > 0
+
+function SectionBlock({ section, index, children }: { section: StyleGuideSection; index: number; children: ReactNode }) {
+  return (
+    <div
+      id={section.id}
+      className={cn(
+        "pdf-section scroll-mt-4 px-12 md:px-20 py-20 md:py-24 border-t border-gray-100",
+        index % 2 === 0 ? "bg-white" : "bg-gray-50/30"
+      )}
+    >
+      <div className="max-w-5xl mx-auto">{children}</div>
+    </div>
+  )
+}
+
+function LockedSection({ section, index, onUpgrade }: { section: StyleGuideSection; index: number; onUpgrade: () => void }) {
+  return (
+    <div data-locked-section>
+      <SectionBlock section={section} index={index}>
+        <ContentGate
+          content={section.content}
+          locked
+          showUpgradeCTA
+          sectionTitle={section.title}
+          sectionId={section.id}
+          onUpgrade={onUpgrade}
+        />
+      </SectionBlock>
+    </div>
+  )
+}
+
+/** "Powered by" footer shown in exports for starter and pro. */
+function BrandingFooter({ tier }: { tier: Tier }) {
+  if (tier === "agency") return null
+  return (
+    <div className="pdf-only px-12 md:px-20 py-12 border-t border-gray-200">
+      <div className="max-w-5xl mx-auto text-center">
+        {tier === "starter" ? (
+          <div className="space-y-4">
+            <p className="text-base font-semibold text-gray-900">Powered by Tone of Voice App</p>
+            <p className="text-sm text-gray-600">
+              Create your own professional tone of voice guidelines in minutes at{" "}
+              <a href="https://toneofvoice.app" className="text-gray-900 hover:underline font-medium">
+                toneofvoice.app
+              </a>
+            </p>
+          </div>
+        ) : (
+          <p className="text-xs text-gray-400">
+            Powered by{" "}
+            <a href="https://toneofvoice.app" className="text-gray-500 hover:underline">
+              Tone of Voice App
+            </a>
+          </p>
+        )}
+      </div>
+    </div>
+  )
+}
+
 /**
- * Single shared guide view: cover, sections, preview/editor modes.
- * Used by both /preview and /full-access.
+ * The guide document: cover and sections in preview mode, or a single editor
+ * (unlocked sections) followed by locked sections in edit mode.
  */
 export function GuideView({
   sections,
-  activeSectionId,
   scrollContainerRef,
   viewMode,
-  onModeSwitch,
-  content,
   onContentChange,
   onBrandNameChange,
   brandName,
-  guideType = "core",
   showPreviewBadge = false,
   isUnlocked,
-  isSectionLocked,
   onUpgrade,
   editorKey,
-  editorRef,
-  storageKey,
   editorId,
-  showEditTools,
-  editorBanner,
   pdfFooter = null,
   contentClassName,
   contentKey,
   websiteUrl,
-  subscriptionTier = 'starter',
+  subscriptionTier = "starter",
   showAI = false,
   coverDisclaimer,
   coverDate,
 }: GuideViewProps) {
   const nonCover = sections.filter((s) => s.id !== "cover")
-  const hasContent = (s: StyleGuideSection) => (s.content || "").trim().length > 0
-  // Separate Questions section to render at bottom
-  const questionsSection = nonCover.find((s) => s.id === "contact" && hasContent(s))
-  const sectionsWithoutQuestions = nonCover.filter((s) => s.id !== "contact")
-  const unlockedSections = sectionsWithoutQuestions.filter((s) => isUnlocked(s.minTier) && hasContent(s))
-  const lockedSections = sectionsWithoutQuestions.filter((s) => !isUnlocked(s.minTier) && hasContent(s))
-  const lockedMarkdown = lockedSections
-    .map((s) => `## ${s.title}\n\n${s.content}`.trim())
-    .join("\n\n")
-  const editableMarkdown = buildEditableMarkdown(sections, isUnlocked)
-  const editorMarkdown = `# ${brandName}\n\n${editableMarkdown}`
+  const lockedSections = nonCover.filter((s) => !isUnlocked(s.minTier) && hasContent(s))
 
-  const selectedTraits = (() => {
-    try {
-      const saved = typeof window !== "undefined" ? localStorage.getItem("selectedTraits") : null
-      return saved ? JSON.parse(saved) : []
-    } catch {
-      return []
-    }
-  })()
+  const handleEditorChange = (md: string) => {
+    const merged = mergeEditedMarkdown({ editorMarkdown: md, sections, isUnlocked, brandName })
+    if (merged.brandName) onBrandNameChange?.(merged.brandName)
+    onContentChange(merged.content)
+  }
+
+  let body: ReactNode
+  if (viewMode === "preview") {
+    // Preview: open sections, then locked sections, then "Questions?" last.
+    const questions = nonCover.find((s) => s.id === "contact" && hasContent(s))
+    const unlocked = nonCover.filter((s) => s.id !== "contact" && isUnlocked(s.minTier) && hasContent(s))
+    const locked = lockedSections.filter((s) => s.id !== "contact")
+    body = (
+      <>
+        <div id="cover" className="scroll-mt-4">
+          <GuideCover
+            brandName={brandName}
+            date={coverDate}
+            showPreviewBadge={showPreviewBadge}
+            websiteUrl={websiteUrl}
+            subscriptionTier={subscriptionTier}
+            disclaimer={coverDisclaimer}
+          />
+        </div>
+        {unlocked.map((section, i) => (
+          <SectionBlock key={section.id} section={section} index={i}>
+            <MarkdownRenderer content={`## ${section.title}\n\n${section.content}`} sectionId={section.id} />
+          </SectionBlock>
+        ))}
+        {locked.map((section, i) => (
+          <LockedSection key={section.id} section={section} index={unlocked.length + i} onUpgrade={onUpgrade} />
+        ))}
+        {questions && (
+          <SectionBlock section={questions} index={unlocked.length + locked.length}>
+            <MarkdownRenderer content={`## ${questions.title}\n\n${questions.content}`} sectionId={questions.id} />
+          </SectionBlock>
+        )}
+      </>
+    )
+  } else {
+    // Edit: one editor with every unlocked section (including "Questions?"), locked sections below.
+    body = (
+      <>
+        <div id="cover" className="scroll-mt-4" />
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col" data-single-editor-root>
+          <GuideEditor
+            key={editorKey}
+            editorId={editorId}
+            markdown={buildEditorMarkdown({ sections, isUnlocked, brandName })}
+            useSectionIds
+            showAI={showAI}
+            subscriptionTier={subscriptionTier}
+            onChange={handleEditorChange}
+          />
+        </div>
+        {lockedSections.map((section, i) => (
+          <LockedSection key={section.id} section={section} index={i} onUpgrade={onUpgrade} />
+        ))}
+      </>
+    )
+  }
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
@@ -125,215 +209,9 @@ export function GuideView({
             contentClassName
           )}
         >
-          {viewMode === "preview" ? (
-            <>
-              <div id="cover" className="scroll-mt-4">
-                <GuideCover
-                  brandName={brandName}
-                  guideType={guideType}
-                  date={coverDate}
-                  showPreviewBadge={showPreviewBadge}
-                  websiteUrl={websiteUrl}
-                  subscriptionTier={subscriptionTier}
-                  disclaimer={coverDisclaimer}
-                />
-              </div>
-              {unlockedSections.map((section, index) => (
-                <div
-                  key={section.id}
-                  id={section.id}
-                  className={cn(
-                    "pdf-section scroll-mt-4 px-12 md:px-20 py-20 md:py-24 border-t border-gray-100",
-                    index % 2 === 0 ? "bg-white" : "bg-gray-50/30"
-                  )}
-                >
-                  <div className="max-w-5xl mx-auto">
-                    <MarkdownRenderer
-                      content={`## ${section.title}\n\n${section.content}`}
-                      selectedTraits={selectedTraits}
-                      sectionId={section.id}
-                    />
-                  </div>
-                </div>
-              ))}
-              {lockedSections.map((section, index) => (
-                <div
-                  key={section.id}
-                  id={section.id}
-                  data-locked-section
-                  className={cn(
-                    "pdf-section scroll-mt-4 px-12 md:px-20 py-20 md:py-24 border-t border-gray-100",
-                    (unlockedSections.length + index) % 2 === 0 ? "bg-white" : "bg-gray-50/30"
-                  )}
-                >
-                  <div className="max-w-5xl mx-auto">
-                    <ContentGate
-                      content={section.content}
-                      locked={true}
-                      showUpgradeCTA={true}
-                      sectionTitle={section.title}
-                      sectionId={section.id}
-                      onUpgrade={onUpgrade}
-                      selectedTraits={selectedTraits}
-                    />
-                  </div>
-                </div>
-              ))}
-              {/* Questions section always at bottom */}
-              {questionsSection && (
-                <div
-                  key={questionsSection.id}
-                  id={questionsSection.id}
-                  className={cn(
-                    "pdf-section scroll-mt-4 px-12 md:px-20 py-20 md:py-24 border-t border-gray-100",
-                    (unlockedSections.length + lockedSections.length) % 2 === 0 ? "bg-white" : "bg-gray-50/30"
-                  )}
-                >
-                  <div className="max-w-5xl mx-auto">
-                    <MarkdownRenderer
-                      content={`## ${questionsSection.title}\n\n${questionsSection.content}`}
-                      selectedTraits={selectedTraits}
-                      sectionId={questionsSection.id}
-                    />
-                  </div>
-                </div>
-              )}
-
-              {/* Branded footer - after all content, tier-based visibility */}
-              {(subscriptionTier === 'starter' || subscriptionTier === 'pro') && (
-                <div className="pdf-only px-12 md:px-20 py-12 border-t border-gray-200">
-                  <div className="max-w-5xl mx-auto text-center">
-                    {subscriptionTier === 'starter' && (
-                      <div className="space-y-4">
-                        <p className="text-base font-semibold text-gray-900">
-                          Powered by Tone of Voice App
-                        </p>
-                        <p className="text-sm text-gray-600">
-                          Create your own professional tone of voice guidelines in minutes at{' '}
-                          <a href="https://toneofvoice.app" className="text-gray-900 hover:underline font-medium">
-                            toneofvoice.app
-                          </a>
-                        </p>
-                      </div>
-                    )}
-                    {subscriptionTier === 'pro' && (
-                      <p className="text-xs text-gray-400">
-                        Powered by{' '}
-                        <a href="https://toneofvoice.app" className="text-gray-500 hover:underline">
-                          Tone of Voice App
-                        </a>
-                      </p>
-                    )}
-                  </div>
-                </div>
-              )}
-            </>
-          ) : (
-            <>
-              <div id="cover" className="scroll-mt-4" />
-              {/* Single editor: fills viewport */}
-              {editorMarkdown && (
-                <div
-                  className="flex min-h-0 min-w-0 flex-1 flex-col"
-                  data-single-editor-root
-                >
-                  {editorBanner}
-                  <GuideEditor
-                    key={editorKey}
-                    ref={editorRef}
-                    editorId={editorId}
-                    markdown={editorMarkdown}
-                    readOnly={false}
-                    useSectionIds={true}
-                    onFocusChange={undefined}
-                    showAI={showAI}
-                    subscriptionTier={subscriptionTier}
-                    onChange={(md) => {
-                      // Extract H1 before stripping - fire if brand name changed
-                      const titleMatch = md.match(/^#\s+(.+)/)
-                      const newTitle = titleMatch?.[1]?.trim()
-                      if (newTitle && newTitle !== brandName) onBrandNameChange?.(newTitle)
-                      const withoutTitle = md.replace(/^#\s+.+\n*/, "").trim()
-                      const full = lockedMarkdown
-                        ? withoutTitle + "\n\n" + lockedMarkdown
-                        : withoutTitle
-                      onContentChange(full)
-                    }}
-                    storageKey={storageKey}
-                  />
-                </div>
-              )}
-              {lockedSections.map((section) => (
-                <div
-                  key={section.id}
-                  id={section.id}
-                  data-locked-section
-                  className="pdf-section scroll-mt-4 px-12 md:px-20 py-16 md:py-20 border-t border-gray-100"
-                >
-                  <div className="max-w-5xl mx-auto">
-                    <ContentGate
-                      content={section.content}
-                      locked={true}
-                      showUpgradeCTA={true}
-                      sectionTitle={section.title}
-                      sectionId={section.id}
-                      onUpgrade={onUpgrade}
-                      selectedTraits={selectedTraits}
-                    />
-                  </div>
-                </div>
-              ))}
-              {/* Questions section always at bottom */}
-              {questionsSection && (
-                <div
-                  key={questionsSection.id}
-                  id={questionsSection.id}
-                  className="pdf-section scroll-mt-4 px-12 md:px-20 py-16 md:py-20 border-t border-gray-100"
-                >
-                  <div className="max-w-5xl mx-auto">
-                    <MarkdownRenderer
-                      content={`## ${questionsSection.title}\n\n${questionsSection.content}`}
-                      selectedTraits={selectedTraits}
-                      sectionId={questionsSection.id}
-                    />
-                  </div>
-                </div>
-              )}
-
-              {/* Branded footer - after all content, tier-based visibility */}
-              {(subscriptionTier === 'starter' || subscriptionTier === 'pro') && (
-                <div className="pdf-only px-12 md:px-20 py-12 border-t border-gray-200">
-                  <div className="max-w-5xl mx-auto text-center">
-                    {subscriptionTier === 'starter' && (
-                      <div className="space-y-4">
-                        <p className="text-base font-semibold text-gray-900">
-                          Powered by Tone of Voice App
-                        </p>
-                        <p className="text-sm text-gray-600">
-                          Create your own professional tone of voice guidelines in minutes at{' '}
-                          <a href="https://toneofvoice.app" className="text-gray-900 hover:underline font-medium">
-                            toneofvoice.app
-                          </a>
-                        </p>
-                      </div>
-                    )}
-                    {subscriptionTier === 'pro' && (
-                      <p className="text-xs text-gray-400">
-                        Powered by{' '}
-                        <a href="https://toneofvoice.app" className="text-gray-500 hover:underline">
-                          Tone of Voice App
-                        </a>
-                      </p>
-                    )}
-                  </div>
-                </div>
-              )}
-            </>
-          )}
-
-          {viewMode === "preview" && (
-            <div className="pdf-exclude h-[50vh] min-h-[300px] shrink-0" aria-hidden />
-          )}
+          {body}
+          <BrandingFooter tier={subscriptionTier} />
+          {viewMode === "preview" && <div className="pdf-exclude h-[50vh] min-h-[300px] shrink-0" aria-hidden />}
           {pdfFooter}
         </div>
       </div>

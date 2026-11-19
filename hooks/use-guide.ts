@@ -1,108 +1,116 @@
 "use client"
 
-import { useState, useEffect, useRef, useCallback, useMemo } from "react"
-
-// Survives Strict Mode double-mount
-const tierFetchedForUser = new Set<string>()
-import { useRouter, useSearchParams } from "next/navigation"
+import { useState, useEffect, useRef, useCallback, useMemo, type RefObject } from "react"
 import { useAuth } from "@/components/AuthProvider"
-import { useToast } from "@/hooks/use-toast"
-import type { GuideEditorRef } from "@/components/editor/GuideEditor"
 import {
   parseStyleGuideContent,
   StyleGuideSection,
-  Tier,
   STYLE_GUIDE_SECTIONS,
   insertCustomSection,
 } from "@/lib/content-parser"
+import { isUnlocked as tierUnlocked, normalizeTier, type Tier } from "@/lib/tiers"
+
+export interface BrandDetails {
+  name?: string
+  websiteUrl?: string
+  [key: string]: unknown
+}
+
+export type ViewMode = "preview" | "edit"
+
+const COVER_SECTION: StyleGuideSection = {
+  id: "cover",
+  title: "Cover Page",
+  content: "",
+  level: 1,
+  isMainSection: true,
+  configId: "cover",
+  icon: STYLE_GUIDE_SECTIONS.find((s) => s.id === "cover")?.icon,
+  minTier: "starter",
+}
+
+/**
+ * Sidebar highlight that follows scrolling, plus click-to-scroll.
+ * The observer is rebuilt only when the set of section ids changes, not on every edit.
+ */
+export function useScrollSpy(sectionIds: string[], scrollContainerRef: RefObject<HTMLElement | null>) {
+  const [activeSectionId, setActiveSectionId] = useState("cover")
+  const idsKey = sectionIds.join("\n")
+
+  const handleSectionSelect = useCallback((id: string) => {
+    setActiveSectionId(id)
+    document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" })
+  }, [])
+
+  useEffect(() => {
+    const container = scrollContainerRef.current
+    const ids = idsKey ? idsKey.split("\n") : []
+    if (!container || ids.length === 0) return
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const topmost = entries
+          .filter((e) => e.isIntersecting)
+          .sort((a, b) => a.target.getBoundingClientRect().top - b.target.getBoundingClientRect().top)[0]
+        if (topmost?.target.id) setActiveSectionId(topmost.target.id)
+      },
+      { root: container, rootMargin: "-20% 0px -60% 0px", threshold: 0 }
+    )
+    ids.forEach((id) => {
+      const el = document.getElementById(id)
+      if (el) observer.observe(el)
+    })
+    // Keep the highlight valid when sections change (e.g. after expand)
+    setActiveSectionId((prev) => (ids.includes(prev) ? prev : "cover"))
+    return () => observer.disconnect()
+  }, [idsKey, scrollContainerRef])
+
+  return { activeSectionId, handleSectionSelect }
+}
 
 export interface UseGuideOptions {
-  /** Guide ID from query params (for loading saved guide from DB) */
-  guideId?: string | null
-  /** Default view mode */
-  defaultViewMode?: "preview" | "edit"
-  /** Whether this is a preview flow (free users) */
-  isPreviewFlow?: boolean
+  /** Fetch the tier from /api/user-subscription-tier on mount (false when the guide load provides it). */
+  fetchTier?: boolean
+  /** Side effects for every user edit (persist, mark dirty). Not called for programmatic loads. */
+  onContentChange?: (markdown: string) => void
 }
 
-export interface UseGuideReturn {
-  // Content state
-  content: string | null
-  setContent: (content: string) => void
-  brandDetails: any
-  setBrandDetails: (details: any) => void
-  guideType: string
-  setGuideType: (type: string) => void
+/** Shared guide state: content, sections, tier, view mode and editor remount key. */
+export function useGuide({ fetchTier = true, onContentChange }: UseGuideOptions = {}) {
+  const { user } = useAuth()
 
-  // UI state
-  sections: StyleGuideSection[]
-  activeSectionId: string
-  setActiveSectionId: (id: string) => void
-  viewMode: "preview" | "edit"
-  setViewMode: (mode: "preview" | "edit") => void
-  subscriptionTier: Tier
-  setSubscriptionTier: (tier: Tier) => void
-  isLoading: boolean
-  setIsLoading: (loading: boolean) => void
-
-  // Editor state
-  editorRef: React.RefObject<GuideEditorRef | null>
-  scrollContainerRef: React.RefObject<HTMLDivElement | null>
-  editorKey: number
-  setEditorKey: (key: number | ((prev: number) => number)) => void
-
-  // Actions
-  handleSectionSelect: (id: string) => void
-  handleModeSwitch: (mode: "preview" | "edit") => void
-
-  // Utilities
-  isUnlocked: (minTier?: Tier) => boolean
-  isSectionLocked: boolean
-
-  // Custom sections
-  handleAddSection: (title: string) => void
-}
-
-export function useGuide(options: UseGuideOptions = {}): UseGuideReturn {
-  const { guideId, defaultViewMode = "preview", isPreviewFlow = false } = options
-  const router = useRouter()
-  const searchParams = useSearchParams()
-  const { user, loading: authLoading } = useAuth()
-  const { toast } = useToast()
-
-  // Content state
   const [content, setContent] = useState<string | null>(null)
-  const [brandDetails, setBrandDetails] = useState<any>(null)
+  const [brandDetails, setBrandDetails] = useState<BrandDetails | null>(null)
   const [guideType, setGuideType] = useState<string>("style_guide")
-
-  // UI state: sections derived synchronously so expand/remount gets new content in same render
-  const sections = useMemo(() => {
-    if (!content) return []
-    const parsed = parseStyleGuideContent(content)
-    const coverSection: StyleGuideSection = {
-      id: "cover",
-      title: "Cover Page",
-      content: "",
-      level: 1,
-      isMainSection: true,
-      configId: "cover",
-      icon: STYLE_GUIDE_SECTIONS.find((s) => s.id === "cover")?.icon,
-      minTier: "starter",
-    }
-    return [coverSection, ...parsed]
-  }, [content])
-  const [activeSectionId, setActiveSectionId] = useState<string>("cover")
-  const [viewMode, setViewMode] = useState<"preview" | "edit">(defaultViewMode)
+  const [viewMode, setViewMode] = useState<ViewMode>("preview")
   const [subscriptionTier, setSubscriptionTier] = useState<Tier>("starter")
-  const [isLoading, setIsLoading] = useState(true)
-
-  // Editor state
-  const editorRef = useRef<GuideEditorRef>(null)
-  const scrollContainerRef = useRef<HTMLDivElement>(null)
-  const scrollTopBeforeSwitchRef = useRef<number>(0)
   const [editorKey, setEditorKey] = useState(0)
 
-  // Restore scroll position after mode switch
+  const sections = useMemo(() => (content ? [COVER_SECTION, ...parseStyleGuideContent(content)] : []), [content])
+  const scrollContainerRef = useRef<HTMLDivElement>(null)
+  const sectionIds = useMemo(() => sections.map((s) => s.id), [sections])
+  const { activeSectionId, handleSectionSelect } = useScrollSpy(sectionIds, scrollContainerRef)
+
+  // Tier: fetched fresh on every mount for signed-in users; starter when signed out.
+  const userId = user?.id
+  useEffect(() => {
+    if (!userId) {
+      setSubscriptionTier("starter")
+      return
+    }
+    if (!fetchTier) return
+    const controller = new AbortController()
+    fetch("/api/user-subscription-tier", { signal: controller.signal })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => setSubscriptionTier(normalizeTier(data?.subscription_tier)))
+      .catch(() => {
+        if (!controller.signal.aborted) setSubscriptionTier("starter")
+      })
+    return () => controller.abort()
+  }, [userId, fetchTier])
+
+  // Preserve the scroll position across preview/edit switches.
+  const scrollTopBeforeSwitchRef = useRef(0)
   useEffect(() => {
     requestAnimationFrame(() => {
       if (scrollContainerRef.current && scrollTopBeforeSwitchRef.current > 0) {
@@ -112,139 +120,60 @@ export function useGuide(options: UseGuideOptions = {}): UseGuideReturn {
     })
   }, [viewMode])
 
-  // Fetch subscription tier for all authenticated users
-  useEffect(() => {
-    if (!user) {
-      setSubscriptionTier("starter")
-      tierFetchedForUser.clear()
-      return
-    }
-
-    const userId = user.id
-    if (tierFetchedForUser.has(userId)) return
-    tierFetchedForUser.add(userId)
-
-    fetch("/api/user-subscription-tier")
-      .then(res => res.json())
-      .then(data => setSubscriptionTier((data.subscription_tier === "free" ? "starter" : (data.subscription_tier || "starter")) as Tier))
-      .catch(() => setSubscriptionTier("starter"))
-  }, [user?.id])
-
-  // Scroll to section on sidebar click (center in viewport)
-  const handleSectionSelect = useCallback((id: string) => {
-    setActiveSectionId(id)
-    document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" })
+  const handleModeSwitch = useCallback((mode: ViewMode) => {
+    setViewMode((current) => {
+      if (current !== mode) scrollTopBeforeSwitchRef.current = scrollContainerRef.current?.scrollTop ?? 0
+      return mode
+    })
   }, [])
 
-  // IntersectionObserver: update activeSectionId as user scrolls
+  const isUnlocked = useCallback((minTier?: Tier) => tierUnlocked(subscriptionTier, minTier), [subscriptionTier])
+
+  const onContentChangeRef = useRef(onContentChange)
   useEffect(() => {
-    const container = scrollContainerRef.current
-    if (!container || sections.length === 0) return
+    onContentChangeRef.current = onContentChange
+  }, [onContentChange])
 
-    const observer = new IntersectionObserver(
-      (entries) => {
-        const intersecting = entries
-          .filter((e) => e.isIntersecting)
-          .sort((a, b) => {
-            const aTop = (a.target as HTMLElement).getBoundingClientRect().top
-            const bTop = (b.target as HTMLElement).getBoundingClientRect().top
-            return aTop - bTop
-          })
-        const topmost = intersecting[0]
-        if (topmost) {
-          const id = (topmost.target as HTMLElement).id
-          if (id) setActiveSectionId(id)
-        }
-      },
-      { root: container, rootMargin: "-20% 0px -60% 0px", threshold: 0 }
-    )
+  /** The single path for user edits: update state and run the caller's side effects. */
+  const updateContent = useCallback((markdown: string) => {
+    setContent(markdown)
+    onContentChangeRef.current?.(markdown)
+  }, [])
 
-    sections.forEach((s) => {
-      const el = document.getElementById(s.id)
-      if (el) observer.observe(el)
-    })
-    return () => observer.disconnect()
-  }, [sections])
-
-  // Keep activeSectionId valid when sections change (e.g. after expand)
-  useEffect(() => {
-    if (sections.length === 0) return
-    setActiveSectionId((prev) =>
-      sections.some((s) => s.id === prev) ? prev : "cover"
-    )
-  }, [sections])
-
-  // Mode switching with scroll position preservation
-  const handleModeSwitch = useCallback((mode: "preview" | "edit") => {
-    if (mode === viewMode) return
-    scrollTopBeforeSwitchRef.current = scrollContainerRef.current?.scrollTop ?? 0
-    setViewMode(mode)
-  }, [viewMode])
-
-  // Unlock check: starter (free) < pro < agency
-  const isUnlocked = useCallback((minTier?: Tier) => {
-    if (!minTier || minTier === 'starter') return true
-    if (subscriptionTier === 'starter') return false
-    if (minTier === 'agency' && subscriptionTier !== 'agency') return false
-    return true
-  }, [subscriptionTier])
-
-  const activeSection = sections.find(s => s.id === activeSectionId)
-  const isSectionLocked = activeSection ? !isUnlocked(activeSection.minTier) : false
-
-  // Add a custom section to the guide
-  const handleAddSection = useCallback((title: string) => {
-    if (!content) return
-    const newMarkdown = insertCustomSection(content, title)
-    if (newMarkdown === content) return // no change (empty title or at limit)
-    setContent(newMarkdown)
-    setEditorKey(k => k + 1)
-    // After render, scroll to the new section
-    requestAnimationFrame(() => {
-      const newSections = parseStyleGuideContent(newMarkdown)
-      const newSection = newSections.find(s => s.title === title.trim().slice(0, 60))
-      if (newSection) {
-        setActiveSectionId(newSection.id)
-        document.getElementById(newSection.id)?.scrollIntoView({ behavior: "smooth", block: "start" })
-      }
-    })
-  }, [content])
+  const handleAddSection = useCallback(
+    (title: string) => {
+      if (!content) return
+      const next = insertCustomSection(content, title)
+      if (next === content) return // empty title or custom-section limit reached
+      updateContent(next)
+      setEditorKey((k) => k + 1)
+      requestAnimationFrame(() => {
+        const added = parseStyleGuideContent(next).find((s) => s.title === title.trim().slice(0, 60))
+        if (added) handleSectionSelect(added.id)
+      })
+    },
+    [content, updateContent, handleSectionSelect]
+  )
 
   return {
-    // Content state
     content,
     setContent,
+    updateContent,
     brandDetails,
     setBrandDetails,
     guideType,
     setGuideType,
-
-    // UI state
     sections,
     activeSectionId,
-    setActiveSectionId,
+    handleSectionSelect,
     viewMode,
-    setViewMode,
+    handleModeSwitch,
     subscriptionTier,
     setSubscriptionTier,
-    isLoading,
-    setIsLoading,
-
-    // Editor state
-    editorRef,
+    isUnlocked,
     scrollContainerRef,
     editorKey,
     setEditorKey,
-
-    // Actions
-    handleSectionSelect,
-    handleModeSwitch,
-
-    // Utilities
-    isUnlocked,
-    isSectionLocked,
-
-    // Custom sections
     handleAddSection,
   }
 }

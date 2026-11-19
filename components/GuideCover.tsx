@@ -6,7 +6,6 @@ import { cn } from "@/lib/utils"
 
 interface GuideCoverProps {
   brandName: string
-  guideType?: 'core' | 'complete' | 'style_guide'
   date?: string
   showPreviewBadge?: boolean
   className?: string
@@ -21,7 +20,6 @@ const COVER_EYEBROW = "Brand Voice & Content Guidelines"
 
 export function GuideCover({
   brandName,
-  guideType,
   date,
   showPreviewBadge,
   className,

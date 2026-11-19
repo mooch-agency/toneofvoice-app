@@ -17,6 +17,7 @@ import { cn } from "@/lib/utils"
 import { Lock } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { MarkdownRenderer } from "./MarkdownRenderer"
+import { stripUnlockPlaceholders } from "@/lib/guide-placeholders"
 
 interface ContentGateProps {
   /** The markdown content to split and gate */
@@ -25,8 +26,6 @@ interface ContentGateProps {
   showUpgradeCTA?: boolean
   /** Callback when upgrade button is clicked */
   onUpgrade?: () => void
-  /** Selected traits for MarkdownRenderer */
-  selectedTraits?: string[]
   /** If true, show entire content blurred with lock overlay (section-level gating) */
   locked?: boolean
   /** Section heading to show above the lock overlay */
@@ -39,14 +38,12 @@ interface ContentGateProps {
  * ContentGate component shows section-level gating: when locked=true,
  * displays section heading + blurred content + lock overlay and upgrade CTA.
  */
-export function ContentGate({ content, showUpgradeCTA = true, onUpgrade, selectedTraits = [], locked = false, sectionTitle, sectionId }: ContentGateProps) {
+export function ContentGate({ content, showUpgradeCTA = true, onUpgrade, locked = false, sectionTitle, sectionId }: ContentGateProps) {
   // Section-level locking: show heading + explainer + lock overlay
   if (locked) {
     const sectionDescription = sectionTitle ? getSectionDescription(sectionTitle) : null
     // Strip "Unlock to see..." placeholder lines and following --- so they never show (current or future content)
-    const strippedContent = content
-      .replace(/\n*_Unlock to see[^_]+_[^\n]*\n(\s*---\s*\n)?/gi, "\n")
-      .replace(/\n{3,}/g, "\n\n")
+    const strippedContent = stripUnlockPlaceholders(content).replace(/\n{3,}/g, "\n\n")
     // Preview snippet from stripped content only; skip placeholders and separator-only lines
     const strippedLines = strippedContent.split("\n").filter((l) => {
       const t = l.trim()
@@ -89,7 +86,7 @@ export function ContentGate({ content, showUpgradeCTA = true, onUpgrade, selecte
         <div className="relative min-h-[40vh] border-2 border-dashed border-gray-300 dark:border-gray-700 rounded-lg overflow-hidden">
           {/* Blurred content preview */}
           <div className="blur-[6px] select-none pointer-events-none opacity-20 transition-all duration-500">
-            <MarkdownRenderer content={strippedContent} selectedTraits={selectedTraits} sectionId={sectionId} />
+            <MarkdownRenderer content={strippedContent} sectionId={sectionId} />
           </div>
 
           {/* Lock overlay with gradient */}
@@ -127,5 +124,5 @@ export function ContentGate({ content, showUpgradeCTA = true, onUpgrade, selecte
   }
 
   // Not locked: render content as-is
-  return <MarkdownRenderer content={content} selectedTraits={selectedTraits} sectionId={sectionId} />
+  return <MarkdownRenderer content={content} sectionId={sectionId} />
 }

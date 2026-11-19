@@ -5,7 +5,6 @@ import { X, CheckCircle2, Users, Sparkles, PenLine } from "lucide-react"
 import { cn } from "@/lib/utils"
 
 interface PostExportPromptProps {
-  content: string
   onDismiss: () => void
   className?: string
 }
@@ -14,7 +13,7 @@ interface PostExportPromptProps {
  * Shown after user exports their tone of voice guide. Shows next steps:
  * share guidelines, use guidelines, update anytime. Dismissible.
  */
-export function PostExportPrompt({ content, onDismiss, className }: PostExportPromptProps) {
+export function PostExportPrompt({ onDismiss, className }: PostExportPromptProps) {
   return (
     <div
       role="status"
