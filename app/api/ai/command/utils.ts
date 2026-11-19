@@ -20,30 +20,9 @@ export const tag = (tag: string, content?: string | null) => {
   return [`<${tag}>`, content, `</${tag}>`].join('\n');
 };
 
-/**
- * Tag content inline
- *
- * @example
- *   <tools>{content}</tools>
- */
-export const inlineTag = (tag: string, content?: string | null) => {
-  if (!content) return '';
-
-  return [`<${tag}>`, content, `</${tag}>`].join('');
-};
-
 // Sections split by double newlines
 export const sections = (sections: (boolean | string | null | undefined)[]) =>
   sections.filter(Boolean).join('\n\n');
-
-// List items split by newlines
-export const list = (items: string[] | undefined) =>
-  items
-    ? items
-        .filter(Boolean)
-        .map((item) => `- ${item}`)
-        .join('\n')
-    : '';
 
 export type StructuredPromptSections = {
   context?: string;
