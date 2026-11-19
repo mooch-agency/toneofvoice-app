@@ -1,66 +1,29 @@
-import { createClient, MissingSupabaseConfigError } from "@/lib/supabase-server";
-import { NextResponse } from "next/server";
+import { NextResponse } from "next/server"
+import { requireUser, withRouteErrors } from "@/lib/api-auth"
 
-/** Delete a style guide by ID. User must own it. */
+/** Delete one of the signed-in user's guides. */
 export async function DELETE(req: Request) {
-  try {
-    const { searchParams } = new URL(req.url);
-    const guideId = searchParams.get("guideId");
+  return withRouteErrors("delete-style-guide", async () => {
+    const guideId = new URL(req.url).searchParams.get("guideId")
+    if (!guideId) return NextResponse.json({ error: "Missing guideId" }, { status: 400 })
 
-    if (!guideId) {
-      return NextResponse.json(
-        { error: "Missing guideId" },
-        { status: 400 }
-      );
-    }
+    const auth = await requireUser()
+    if (!auth.ok) return auth.response
 
-    const supabase = await createClient();
-    const { data, error: authError } = await supabase.auth.getUser();
-    const user = data?.user;
-
-    if (authError || !user) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
-
-    // Verify user owns the guide before deleting
-    const { data: guide, error: checkError } = await supabase
-      .from("style_guides")
-      .select("id")
-      .eq("id", guideId)
-      .eq("user_id", user.id)
-      .single();
-
-    if (checkError || !guide) {
-      return NextResponse.json(
-        { error: "Guide not found or access denied" },
-        { status: 404 }
-      );
-    }
-
-    // Delete the guide
-    const { error: deleteError } = await supabase
+    const { data, error } = await auth.supabase
       .from("style_guides")
       .delete()
       .eq("id", guideId)
-      .eq("user_id", user.id);
+      .eq("user_id", auth.user.id)
+      .select("id")
 
-    if (deleteError) {
-      console.error("[delete-style-guide] Delete error:", deleteError);
-      return NextResponse.json(
-        { error: deleteError.message || "Failed to delete guide" },
-        { status: 500 }
-      );
+    if (error) {
+      console.error("[delete-style-guide] Delete error:", error)
+      return NextResponse.json({ error: "Failed to delete guide" }, { status: 500 })
     }
-
-    return NextResponse.json({ success: true });
-  } catch (e) {
-    if (e instanceof MissingSupabaseConfigError) {
-      return NextResponse.json({ error: "Service unavailable" }, { status: 503 });
+    if (!data || data.length === 0) {
+      return NextResponse.json({ error: "Guide not found or access denied" }, { status: 404 })
     }
-    console.error("[delete-style-guide] Error:", e);
-    return NextResponse.json(
-      { error: "Failed to delete guide" },
-      { status: 500 }
-    );
-  }
+    return NextResponse.json({ success: true })
+  })
 }
