@@ -1,294 +1,161 @@
-# Tone of Voice App - Product Spec
+# Tone of Voice App - Product and Architecture
 
-**Last Updated:** 2026-02-18
+**Last updated:** 2026-11-19
 **Domain:** toneofvoice.app (previously aistyleguide.com)
-**Stack:** Next.js 15, React 19, TypeScript, Tailwind, Supabase, Stripe, OpenAI, Firecrawl
+**Stack:** Next.js 16 (App Router, Turbopack), React 19, TypeScript, Tailwind 3, Supabase, Stripe, OpenAI, Plate.js
 
 ---
 
-## What This Product Does
+## What this product does
 
-AI-powered SaaS that generates professional tone of voice guides in under 5 minutes.
+A SaaS app that writes a brand's tone of voice guide in a few minutes.
 
-**Input:** Website URL or brand description
-**Output:** A comprehensive guide covering:
+**Input:** a website URL or a short brand description.
+**Output:** a guide with:
 - 3 brand voice traits (definition, do's, don'ts)
-- 25 writing rules (tone, grammar, formatting)
-- 10 brand terms and phrases for consistent vocabulary
-- 5 before/after examples showing voice applied to real content
-- 12 AI writing cleanup rules (universal, all tiers)
-- Custom sections (Pro/Agency: add up to 5 additional sections)
-- Export formats: PDF (Puppeteer + html2pdf fallback), Word-compatible HTML, Markdown
+- Audience (overview, primary, secondary)
+- 25 writing rules
+- Before/after examples
+- Word list (preferred terms, spelling and usage, avoid terms)
+- AI writing cleanup rules (all tiers)
+- Up to 5 custom sections (Pro/Agency)
+- Exports: PDF (server Chrome, html2pdf fallback), Word (.docx), Markdown
 
 ---
 
-## Subscription Tiers
+## Tiers
 
-| Tier | Guides | Access |
-|------|--------|--------|
-| Free Preview | 1 | Preview sections only (locked sections behind paywall) |
-| Starter | 10/month | Full access, all export formats |
-| Pro | 2 | Full access, all export formats, custom sections (up to 5) |
-| Agency (formerly Team) | Unlimited | Full access, all features, custom sections (up to 5), roadmap |
+Limits live in one place: `lib/tiers.ts` (`TIER_LIMITS`). Server routes, the database trigger and UI copy all use it.
 
-Guide limits enforced via `/api/user-guide-limit` and Supabase row-level security.
+| Tier | Saved guides | Access |
+|------|--------------|--------|
+| Starter (free) | 1 | Preview sections; paid sections locked |
+| Pro | 2 | Full guide, AI editing, custom sections |
+| Agency | 99 | Everything in Pro |
+
+A paid tier only counts while the Stripe subscription is not lapsed (`effectiveTier`). `past_due`, `unpaid`, `cancelled` and similar statuses fall back to Starter.
 
 ---
 
-## Key User Flows
+## User flows
 
-### 1. Preview Flow (Free)
-1. User enters URL or description on the home page hero
-2. `/api/extract-website` scrapes site (Firecrawl primary, Cheerio fallback) → OpenAI extracts brand info
-3. Extracted brand details (including suggested traits + keywords) are stored in `localStorage`
-4. User is redirected straight to `/guide?generate=preview` where AI generates preview sections: About, Audience, Voice, Guidelines
-5. Gradient fade → locked sections → upgrade CTA
+### 1. Preview (anonymous or signed in)
+1. The home page hero (or the dashboard's "New guide" modal) takes a URL or description.
+2. `POST /api/extract-website` scrapes the site with Cheerio (SSRF-safe, see below) and asks OpenAI for the brand name, description, audience, keywords and suggested traits.
+3. `lib/extraction.ts` stores the result in `localStorage` and stamps the draft time.
+4. `/guide?generate=preview` calls `POST /api/preview`, which writes the free sections and leaves `_Unlock to see …_` placeholders for paid ones.
 
-### 2. Full Guide Flow (Paid)
-1. After Stripe payment → generate full guide
-2. **Merge mode**: If preview exists, preserve it, only generate locked sections
-3. Save to Supabase DB with `guideId`
-4. Redirect to `/guide?guideId=X`
+### 2. Sign up and claim
+After sign-in, `/auth/claim` and `AutoSaveGuide` save the pending draft (`lib/pending-draft.ts`) to the account. Drafts older than 24 hours are dropped, so a shared browser never hands one visitor's draft to another. Sign-out clears all draft keys.
 
-### 3. Edit Flow (Paid)
-1. Load guide from DB by `guideId`
-2. Plate.js editor with full formatting toolkit + AI (Cmd+J)
-3. Auto-save on edit (2s debounce)
-4. Switch between edit/preview modes
+### 3. Subscribe and expand
+1. `POST /api/create-subscription-session` starts Stripe Checkout. Users who already pay get `409 { manageUrl }` and go to the billing portal instead.
+2. Stripe calls `POST /api/webhook`; `lib/stripe.ts#applySubscriptionToProfile` writes the plan. `/dashboard?subscription=success&session_id=…` also calls `POST /api/verify-subscription` as a fallback.
+3. On a saved guide, "Generate full guide" calls `POST /api/expand-style-guide`. It fills only the placeholder sections, keeps placeholders for any section that failed (`502 { failedSections }`), and refuses to overwrite a guide that changed meanwhile (`409`).
+
+### 4. Edit and export
+- `/guide?guideId=…` loads from the database. Plate.js editor; edits autosave with a 2 s debounce and flush on leave (`hooks/use-autosave.ts`).
+- AI editing (Cmd+J) uses `POST /api/ai/command`, paid tiers only. Starters see an upgrade dialog.
+- Exports: `lib/export-markdown.ts` (Markdown), `lib/file-generator.ts` (Word), `POST /api/export-pdf` (signed-in users) with html2pdf in the browser as the fallback.
 
 ---
 
 ## Architecture
 
-### Storage Strategy
-- **localStorage**: Creation flow only (brand details, preview content)
-- **Supabase DB**: Source of truth once guide has `guideId`
-- **Auto-save**: 2s debounce on edits (authenticated + has guideId)
+### Directory map
 
-### Website Extraction
-- Firecrawl scrapes page to markdown → OpenAI extracts brand info
-- If homepage thin (<2500 chars), maps and scrapes 2-3 key subpages
-- Fallback: Cheerio when `FIRECRAWL_API_KEY` not set
-- Both URL and description routes use same OpenAI model/prompt for consistency
+| Path | What it holds |
+|------|---------------|
+| `app/` | Pages and route handlers. `/guide` is split into `_hooks/` and `_components/`. |
+| `app/api/` | Route handlers (see below). |
+| `components/` | App components; `components/ui/` holds shadcn and Plate UI pieces; `components/editor/` the editor. |
+| `hooks/` | Shared client hooks (`use-guide`, `use-autosave`, `use-extraction`, `use-toast`). |
+| `lib/` | Pure logic and server modules. Every module with logic has a `*.test.ts` next to it. |
+| `proxy.ts` | Next 16 proxy (was `middleware.ts`): refreshes the Supabase session on pages, guards `/dashboard`. |
+| `supabase/migrations/` | Database migrations. |
+| `templates/style_guide_template.md` | Guide template. |
+| `test/` | Test setup and shared fakes. |
 
-### Future: Advanced guide settings (not yet implemented)
-- Potential UI surfaces (deferred):
-  - Header-level “Guide settings” drawer on `/guide` for language variant, formality, reading level, and keywords
-  - Inline quick settings in the editor toolbar that apply to future AI edits only
-- Behavior principles:
-  - Settings should update generation inputs and optional regenerated sections, without silently overwriting existing manual edits
-  - Users should be able to choose whether changes apply only to future AI actions or also regenerate specific sections (e.g. Style Rules, Word List)
+### API routes
 
-### PDF Export
-1. **Primary**: POST to `/api/export-pdf` (Puppeteer + Chromium, server-side)
-2. **Fallback**: Client-side html2pdf.js if API fails
-3. Locked sections excluded from PDF for free users
+| Route | Auth | Purpose |
+|-------|------|---------|
+| `extract-website` | none, rate limited | Scrape + extract brand details |
+| `preview` | optional, rate limited | Generate preview sections |
+| `expand-style-guide` | paid | Generate the locked sections of a saved guide |
+| `save-style-guide` / `load-style-guide` / `delete-style-guide` | user | Guide storage (owner only; limit enforced) |
+| `user-guide-limit` / `user-subscription-tier` | user | Tier and usage for the UI |
+| `create-subscription-session` / `create-portal-session` / `verify-subscription` | user | Stripe |
+| `webhook` | Stripe signature | Subscription events (deduped, retried on failure) |
+| `ai/command` | paid, rate limited | Plate.js AI commands (model fixed on the server) |
+| `export-pdf` | user, rate limited | Server PDF (JavaScript off, network locked down) |
+| `post-to-webflow` | shared secret | Zapier to Webflow blog publishing |
+| `cron/keep-alive` | `CRON_SECRET` | Keeps Supabase awake |
 
-### AI/LLM
-- Extraction/generation: `gpt-5.2` with `reasoning_effort: "none"` (speed/cost)
-- AI Cmd+J (Plate.js): `gpt-5-mini` with minimality constraint (don't over-edit)
-- Generation prompts: `lib/openai.ts`
-- Extraction prompt: `lib/prompts/extraction-prompt.ts`
-- Template: `templates/style_guide_template.md`
-- LangSmith for trace monitoring (optional, see `/docs/LANGSMITH-SETUP.md`)
+Shared route helpers: `lib/api-auth.ts` (`requireUser`, `withRouteErrors`, `tooManyRequests`) and `lib/rate-limit.ts` (in memory, best effort per instance).
 
----
+### Security notes
+- `lib/url-validation.ts#assertPublicHttpUrl` blocks private, loopback, link-local and metadata addresses (including DNS answers). The scraper re-checks every redirect and only follows same-site links.
+- Redirect targets from URLs go through `lib/safe-redirect.ts`.
+- Server-only modules (`openai`, `stripe`, `supabase-admin`, scraper, PDF) import `server-only`, so a client import fails the build.
+- `supabase/migrations/002_security_hardening.sql` adds RLS, column privileges, the guide-limit trigger and the Stripe event table. Review it before applying.
 
-## Guide Content Structure
+### AI
+- Extraction and generation: `gpt-5.2` through one shared OpenAI client (`lib/langsmith-openai.ts`, 60 s timeout, SDK retries). JSON answers are validated and retried once (`lib/llm-json.ts`).
+- Editor AI: `gpt-5-mini` via the Vercel AI SDK v5.
+- LangSmith tracing is optional (`docs/LANGSMITH-SETUP.md`).
 
-### Audience Section
-- **Overview**: 1 sentence, who we write for (demographic/context, not "people who rely on us")
-- **Primary**: 2 paragraphs, 2 sentences each (who + context, then goals/motivations/anxieties)
-- **Secondary**: 1 paragraph, 2 sentences, brief only
-- No writing advice in this section. Works for B2B, B2C, any brand.
-- Headings: `### Audience (Overview)`, `### Primary Audience`, `### Secondary Audience`
-
-### Word Lists
-Order: Preferred Terms → Spelling and Usage → Avoid Terms
-Format: Two-column tables (Use | Instead of) for Preferred Terms and Spelling/Usage
-
-### Content Rules
-- No em dashes anywhere in generated content or UI copy - use hyphens or rewrite
-- Brand description: 80-120 words, 2-3 paragraphs, outcome-focused, no buzzwords
-
-### AI Writing Cleanup Rules (NEW)
-- Universal section in every guide (all tiers, including free)
-- 12 rules for removing AI writing patterns: em dashes, hedging, staccato rhythm, gift-wrapped endings, etc.
-- Adapted from deslop.md source file
-- Positioned after Word List, before Questions section
-- Editable like any other section (Pro/Agency only)
-- Highlighted in landing page, pricing cards, and FAQ as key selling point
-
-### Custom Sections (NEW)
-- Pro/Agency users can add up to 5 custom sections
-- Added via sidebar "+ Add section" button (inline text input)
-- Positioned before Questions/Contact section
-- First-time hint animation (pulse effect) for discovery
-- Locked for free users (triggers upgrade modal)
-- Max 60 characters per section title
-- Auto-saves like standard sections
+### Design system
+Typography tokens are in `lib/guide-styles.ts`; see `docs/DESIGN_SYSTEM.md`.
 
 ---
 
-## Key Directories & Files
+## Guide content rules
 
-### `/app`
-**Key pages:**
-- `/` - marketing site and primary input (URL or description)
-- `/guide` - unified view/edit (preview + full-access)
-- `/dashboard` - guide list, billing
-- `/payment` - Stripe checkout
-- `/auth`, `/sign-in`, `/sign-up` - Supabase auth
-
-**API routes:**
-- `extract-website` - Firecrawl/Cheerio scraping + OpenAI extraction
-- `preview` - generate preview sections (About, Audience, Voice, Guidelines)
-- `generate-styleguide` - full guide generation
-- `expand-style-guide` - generate locked sections only (merge mode)
-- `save-style-guide` - persist guide to DB
-- `load-style-guide` - load guide by ID
-- `delete-style-guide` - delete guide
-- `export-pdf` - Puppeteer PDF (primary)
-- `export-pdf-fallback` - html2pdf fallback
-- `user-guide-limit` - guide limit check
-- `user-subscription-tier` - get tier
-- `verify-subscription` - post-payment verification
-- `create-subscription-session` - Stripe checkout
-- `create-checkout-session` - Stripe one-off checkout
-- `create-portal-session` - Stripe billing portal
-- `webhook` - Stripe webhooks
-- `ai/command` - Plate.js AI (Cmd+J, streaming, `gpt-5-mini`, auth-gated)
-- `ai-assist` - inline AI assist bar
-- `rewrite-section` - rewrite a guide section
-- `load-template` - load base template
-- `blog/*` - blog generation and retrieval
-- `capture-email` - email capture
-- `admin/*` - admin login/logout
-
-### `/components`
-- `StyleGuideView.tsx` - main guide component (edit/preview modes)
-- `StyleGuideEditor.tsx` - Plate.js editor
-- `MarkdownRenderer.tsx` - polished preview renderer
-- `StyleGuideCover.tsx` - cover page (brand name, date, metadata)
-- `ContentGate.tsx` - paywall (fade + locked headers + CTA)
-- `UpgradeNudgeModal.tsx` - guide limit nudge modal
-- `UserMenu.tsx` - auth menu (sign out, billing)
-- `Footer.tsx` - reusable footer
-
-### `/lib`
-- `openai.ts` - OpenAI API calls and generation prompts
-- `template-processor.ts` - template rendering, merge logic
-- `firecrawl-site-scraper.ts` - Firecrawl integration, smart scraping
-- `content-parser.ts` - parses guide sections
-- `style-guide-styles.ts` - typography tokens (`PREVIEW_*`, `EDITOR_*`)
-- `api-utils.ts` - error mapping (`getUserFriendlyError`, `isAbortError`); error codes: `REQUEST_ABORTED`, `SESSION_EXPIRED`, `INVALID_RESPONSE`, `STORAGE_CORRUPT`
-- `supabase-*.ts` - Supabase client utilities
-
-### `/docs`
-- `RELEASE-NOTES-2026-02.md` - February 2026 release notes
-- `REBRAND-TONEOFVOICE.md` - rebrand plan (aistyleguide.com → toneofvoice.app)
-- `STRIPE-RESTRICTED-KEY-SETUP.md` - Stripe restricted key setup
-- `LANGSMITH-SETUP.md` - AI observability setup
-
-### `/public`
-- `wordmark.svg` / `wordmark.png` - brand wordmark for navigation
-- `robots.txt`, `sitemap.xml` - SEO
-
-### Other
-- `DESIGN_SYSTEM.md` - fonts, colors, spacing, components
-- `templates/style_guide_template.md` - base template for guide generation
-- `PROJECT_CONTEXT.md` - recent changes log (update after major changes)
-- `docs/STYLE_GUIDE_GENERATION.md` - generation flow detail (preview, full, merge, DB save)
+- **Audience:** Overview (1 sentence), Primary (2 short paragraphs), Secondary (1 paragraph). No writing advice.
+- **Word list order:** Preferred Terms, Spelling and Usage, Avoid Terms (two-column tables).
+- **No em dashes** in generated content or UI copy.
+- **Brand description:** 80-120 words, outcome-focused, no buzzwords.
+- **Custom sections:** up to 5, titles up to 60 characters, inserted before "Questions?".
 
 ---
 
-## Design System
+## Environment
 
-- **Typography source of truth**: `lib/style-guide-styles.ts`
-- **Fonts**: Playfair Display (serif headings), Geist Sans (body)
-- **Tokens**: `PREVIEW_*` for read-only mode, `EDITOR_*` for edit mode
-- **Spacing**: Tailwind classes
-- **Docs**: `DESIGN_SYSTEM.md`
+See `.env.example` for every variable and what it is for.
 
 ---
 
-## Environment Variables
-
-| Variable | Required | Purpose |
-|----------|----------|---------|
-| `OPENAI_API_KEY` | Yes | OpenAI API |
-| `NEXT_PUBLIC_SUPABASE_URL` | Yes | Supabase auth |
-| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Yes | Supabase auth |
-| `SUPABASE_SERVICE_ROLE_KEY` | Yes | Supabase admin ops |
-| `STRIPE_SECRET_KEY` | Yes | Stripe payments |
-| `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY` | Yes | Stripe client |
-| `STRIPE_WEBHOOK_SECRET` | Yes | Stripe webhooks |
-| `FIRECRAWL_API_KEY` | Optional | Falls back to Cheerio |
-| `LANGSMITH_API_KEY` | Optional | AI observability |
-| `LANGSMITH_TRACING` | Optional | AI observability |
-| `LANGSMITH_PROJECT` | Optional | AI observability |
-
----
-
-## Deployment
-
-- **Platform**: Vercel
-- **Database**: Supabase (hosted)
-- **Payments**: Stripe
-- **Dev server**: `pnpm dev` (port 3002)
-
----
-
-## Debugging
-
-| Issue | Fix |
-|-------|-----|
-| Auth errors | Check Supabase URL/keys, verify RLS policies |
-| PDF export fails | Check Puppeteer Chromium binary, fallback to html2pdf |
-| Firecrawl timeout | Increase timeout or fallback to Cheerio |
-| Rate limits | OpenAI rate limits - queue requests or show error |
-
-- **Server logs**: `console.log` in API routes (Vercel logs)
-- **DB**: Check Supabase logs for RLS policy violations
-
-### Mixpanel Session Replays via MCP
-
-The Mixpanel MCP `Get-User-Replays-Data` tool requires a `distinct_id` or `replay_ids` — it can't list all replays directly. To browse replays programmatically:
-
-1. **Get replay IDs**: Query `Get-Property-Values` with `event: "$mp_session_record"` and `property: "$mp_replay_id"`
-2. **Get user IDs**: Query `Get-Property-Values` with `event: "$mp_session_record"` and `property: "$distinct_id"`
-3. **Get user emails**: Query `Get-Property-Values` with `resource_type: "User"` and `property: "$email"`
-4. **Fetch replay data**: Pass up to 20 `replay_ids` to `Get-User-Replays-Data` — returns `replay_analysis` (event timeline) and `replay_events`
-5. **Filter by user**: Use `distinct_id` + `from_date`/`to_date` to get replays for a specific user
-
-Other useful session recording properties: `$browser`, `$os`, `$device`, `replay_start_url`, `$current_url`
-
----
-
-## Testing & Scripts
+## Development
 
 ```bash
-pnpm test                                              # Run Vitest tests
-pnpm test:watch                                        # Watch mode
-
-# Test scripts (require OPENAI_API_KEY + running dev server)
-node scripts/test-audience-prompt.mjs                 # Test audience prompt (defaults: Tesco, Stripe, description)
-node scripts/test-audience-prompt.mjs --url <url>     # Custom URL
-node scripts/test-audience-prompt.mjs --desc "<text>" # Custom description
-node scripts/test-style-rules.mjs                     # Validate style rule quality
-node scripts/test-style-rules-detailed.mjs            # Detailed style rule output and analysis
-
-# Direct API testing
-curl -X POST http://localhost:3002/api/extract-website \
-  -H "Content-Type: application/json" \
-  -d '{"url":"https://stripe.com"}'                   # Test extraction API
-
-npx ccusage@latest                                    # Check Claude Code token usage
+pnpm install
+pnpm dev          # http://localhost:3000
+pnpm test         # Vitest (unit, route and component tests)
+pnpm typecheck    # tsc --noEmit
+pnpm lint         # ESLint (flat config)
+pnpm build        # Production build (type errors fail the build)
 ```
+
+Prompt-quality scripts (need `OPENAI_API_KEY`, some need a running dev server):
+
+```bash
+node scripts/test-audience-prompt.mjs --url https://stripe.com
+node scripts/test-style-rules.mjs
+node scripts/test-style-rules-detailed.mjs
+```
+
+### Debugging
+| Issue | Check |
+|-------|-------|
+| Auth errors | Supabase URL/keys, RLS policies |
+| Paid user shows as Starter | `profiles.subscription_status`; Stripe webhook deliveries |
+| PDF export fails | Chromium binary on the host; the client falls back to html2pdf |
+| 429 responses | In-memory rate limits in `lib/rate-limit.ts` |
 
 ---
 
-## Known Issues
+## History
 
-- `README.md` is outdated (references deprecated "core/complete" guide types)
-- Old routes `/preview` and `/full-access` redirect to `/guide` for backward compat
+- `docs/audit/` - November 2026 audit, plan and findings.
+- `docs/RELEASE-NOTES-*.md` - release notes.
