@@ -3,7 +3,8 @@ import { requireUser, tooManyRequests, withRouteErrors } from "@/lib/api-auth"
 import { parseStoredBrandDetails, readJsonBody } from "@/lib/brand-input"
 import { hasUnlockPlaceholders } from "@/lib/guide-placeholders"
 import Logger from "@/lib/logger"
-import { clientKey, rateLimit } from "@/lib/rate-limit"
+import { clientKey } from "@/lib/rate-limit"
+import { checkRateLimit } from "@/lib/rate-limit-durable"
 import { renderFullGuideFromPreview } from "@/lib/template-processor"
 
 export const maxDuration = 120
@@ -46,7 +47,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Missing guideId" }, { status: 400 })
     }
 
-    const limited = rateLimit(`expand:${clientKey(req, user.id)}`, RATE_LIMIT)
+    const limited = await checkRateLimit(`expand:${clientKey(req, user.id)}`, RATE_LIMIT)
     if (!limited.ok) return tooManyRequests(limited.retryAfterSeconds)
 
     const { data: guide, error: loadError } = await supabase

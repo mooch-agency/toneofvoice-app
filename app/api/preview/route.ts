@@ -3,7 +3,8 @@ import type { User } from "@supabase/supabase-js"
 import { tooManyRequests, withRouteErrors } from "@/lib/api-auth"
 import { parsePreviewRequest, readJsonBody } from "@/lib/brand-input"
 import Logger from "@/lib/logger"
-import { clientKey, rateLimit } from "@/lib/rate-limit"
+import { clientKey } from "@/lib/rate-limit"
+import { checkRateLimit } from "@/lib/rate-limit-durable"
 import { createClient } from "@/lib/supabase-server"
 import { renderStyleGuideTemplate } from "@/lib/template-processor"
 import { effectiveTier, isPaidTier, type Tier } from "@/lib/tiers"
@@ -59,7 +60,7 @@ export async function POST(req: Request) {
     if (!input.ok) return NextResponse.json({ error: input.error }, { status: 400 })
 
     const { user, tier } = await optionalUser()
-    const limited = rateLimit(`preview:${clientKey(req, user?.id)}`, RATE_LIMIT)
+    const limited = await checkRateLimit(`preview:${clientKey(req, user?.id)}`, RATE_LIMIT)
     if (!limited.ok) return tooManyRequests(limited.retryAfterSeconds)
 
     const brandDetails = { ...input.data, traits: input.data.traits.length ? input.data.traits : DEFAULT_TRAITS }

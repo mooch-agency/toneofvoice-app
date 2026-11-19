@@ -8,7 +8,8 @@ import {
 } from "@/lib/openai"
 import { fetchAndExtractWithCheerio } from "@/lib/cheerio-site-scraper"
 import { normalizeUrlInput, parsePublicHttpUrl } from "@/lib/url-validation"
-import { clientKey, rateLimit } from "@/lib/rate-limit"
+import { clientKey } from "@/lib/rate-limit"
+import { checkRateLimit } from "@/lib/rate-limit-durable"
 import { tooManyRequests } from "@/lib/api-auth"
 import { SYSTEM_PROMPT, descriptionPrompt, urlPrompt } from "./prompts"
 
@@ -126,7 +127,7 @@ function badRequest(message: string) {
 }
 
 export async function POST(request: Request) {
-  const limited = rateLimit(`extract-website:${clientKey(request)}`, RATE_LIMIT)
+  const limited = await checkRateLimit(`extract-website:${clientKey(request)}`, RATE_LIMIT)
   if (!limited.ok) return tooManyRequests(limited.retryAfterSeconds)
 
   let raw: unknown

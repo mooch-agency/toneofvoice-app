@@ -16,7 +16,8 @@ import { z } from 'zod';
 import { BaseEditorKit } from '@/components/editor/editor-base-kit';
 import type { ChatMessage, ToolName } from '@/components/editor/use-chat';
 import { requireUser, tooManyRequests, withRouteErrors } from '@/lib/api-auth';
-import { clientKey, rateLimit } from '@/lib/rate-limit';
+import { clientKey } from '@/lib/rate-limit'
+import { checkRateLimit } from '@/lib/rate-limit-durable';
 
 import { MAX_BODY_BYTES, parseCommandBody } from './input';
 import {
@@ -39,7 +40,7 @@ export async function POST(req: Request) {
     const auth = await requireUser({ requirePaid: true });
     if (!auth.ok) return auth.response;
 
-    const limited = rateLimit(`ai-command:${clientKey(req, auth.user.id)}`, RATE_LIMIT);
+    const limited = await checkRateLimit(`ai-command:${clientKey(req, auth.user.id)}`, RATE_LIMIT);
     if (!limited.ok) return tooManyRequests(limited.retryAfterSeconds);
 
     if (!process.env.OPENAI_API_KEY) {

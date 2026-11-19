@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server"
 import type Stripe from "stripe"
 import { requireUser, tooManyRequests } from "@/lib/api-auth"
-import { clientKey, rateLimit } from "@/lib/rate-limit"
+import { clientKey } from "@/lib/rate-limit"
+import { checkRateLimit } from "@/lib/rate-limit-durable"
 import { ACTIVE_STATUSES, applySubscriptionToProfile, findSubscription, getStripe, withBillingErrors } from "@/lib/stripe"
 import { effectiveTier, isPaidTier } from "@/lib/tiers"
 
@@ -18,7 +19,7 @@ export async function POST(req: Request) {
     if (!auth.ok) return auth.response
     const { supabase, user } = auth
 
-    const limited = rateLimit(`verify-subscription:${clientKey(req, user.id)}`, { limit: 10, windowMs: 60_000 })
+    const limited = await checkRateLimit(`verify-subscription:${clientKey(req, user.id)}`, { limit: 10, windowMs: 60_000 })
     if (!limited.ok) return tooManyRequests(limited.retryAfterSeconds)
 
     const body = (await req.json().catch(() => ({}))) as { session_id?: unknown }

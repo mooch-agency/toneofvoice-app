@@ -2,7 +2,8 @@ import { NextResponse } from "next/server"
 import puppeteer from "puppeteer-core"
 import { MAX_PDF_BODY_BYTES, getChromeLaunchOptions, isAllowedPdfRequest } from "@/lib/pdf-chrome"
 import { requireUser, tooManyRequests, withRouteErrors } from "@/lib/api-auth"
-import { clientKey, rateLimit } from "@/lib/rate-limit"
+import { clientKey } from "@/lib/rate-limit"
+import { checkRateLimit } from "@/lib/rate-limit-durable"
 
 // Allow longer run for PDF generation (cold start + render)
 export const maxDuration = 60
@@ -58,7 +59,7 @@ export async function POST(request: Request) {
     const auth = await requireUser()
     if (!auth.ok) return auth.response
 
-    const limited = rateLimit(`export-pdf:${clientKey(request, auth.user.id)}`, RATE_LIMIT)
+    const limited = await checkRateLimit(`export-pdf:${clientKey(request, auth.user.id)}`, RATE_LIMIT)
     if (!limited.ok) return tooManyRequests(limited.retryAfterSeconds)
 
     const text = await readBodyCapped(request, MAX_PDF_BODY_BYTES)
