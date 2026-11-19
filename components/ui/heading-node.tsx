@@ -48,7 +48,7 @@ const headingVariants = cva('relative', {
 });
 
 export function HeadingElement({
-  variant = 'h1',
+  variant = 'h4',
   ...props
 }: PlateElementProps & VariantProps<typeof headingVariants>) {
   return (
