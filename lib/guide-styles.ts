@@ -5,9 +5,10 @@
 // Editor variants: slightly more compact, functional, still readable
 
 import type { CSSProperties } from "react"
+import { getSectionIdFromHeading } from "./content-parser"
 
 // Shared serif font style (used by both preview and editor)
-export const SERIF_FONT_STYLE: CSSProperties = {
+const SERIF_FONT_STYLE: CSSProperties = {
   fontFamily: "var(--font-display), serif",
   letterSpacing: "-0.02em",
 }
@@ -99,9 +100,6 @@ export const EDITOR_H3_STYLE: CSSProperties = {
 // H4 - Editor sub-subsection headings
 export const EDITOR_H4_CLASS = "text-lg font-semibold tracking-tight text-gray-800"
 
-// Body text in editor
-export const EDITOR_BODY_CLASS = "text-base leading-relaxed text-gray-700"
-
 // Decorative bar under H2 in editor (same as preview for consistency)
 export const EDITOR_H2_BAR_CLASS = "h-1 w-16 bg-gray-900 rounded-full"
 
@@ -116,42 +114,31 @@ export const EDITOR_H4_MARGIN_TOP = "mt-6"
 export const EDITOR_H4_MARGIN_BOTTOM = "mb-2"
 
 // ============================================================================
-// LEGACY EXPORTS (for backward compatibility during migration)
+// SECTION LABELS (keyed by content-parser section id, so headings are matched in one place)
 // ============================================================================
 
-// These are kept for now but will be replaced with PREVIEW variants
-export const SECTION_H2_CLASS = PREVIEW_H2_CLASS
-export const SECTION_H2_STYLE = PREVIEW_H2_STYLE
-export const SECTION_H2_BAR_CLASS = PREVIEW_H2_BAR_CLASS
+const SECTION_COPY: Record<string, { eyebrow: string; description?: string }> = {
+  about: { eyebrow: "BRAND OVERVIEW" },
+  "how-to-use": { eyebrow: "USAGE GUIDE" },
+  audience: { eyebrow: "WHO YOU'RE WRITING FOR", description: "Who we write for and how to address them." },
+  "content-guidelines": { eyebrow: "FOUNDATION", description: "Guardrails for short-form, long-form, and product copy." },
+  "brand-voice": {
+    eyebrow: "BRAND IDENTITY",
+    description: "The core character of our brand that defines the dos and don'ts of our personality.",
+  },
+  "style-rules": { eyebrow: "STYLE RULES", description: "Rules that support our brand voice across every channel." },
+  examples: { eyebrow: "EXAMPLES", description: "Real examples that show our guidelines in action." },
+  "word-list": { eyebrow: "TERMINOLOGY", description: "Preferred terms, words to avoid, and spelling conventions." },
+}
 
-// ============================================================================
-// UTILITY FUNCTIONS
-// ============================================================================
+const sectionCopy = (headingText: string) => SECTION_COPY[getSectionIdFromHeading(headingText.trim())]
 
 /** Section explainer copy: first person plural, informational. Preview only (not in editor). */
 export function getSectionDescription(headingText: string): string | null {
-  const text = headingText.trim();
-  const lower = text.toLowerCase();
-  if (lower.includes("brand voice")) return "The core character of our brand that defines the dos and don'ts of our personality.";
-  if (/your\s+audience/i.test(text)) return "Who we write for and how to address them.";
-  if (/content\s+guidelines/i.test(text)) return "Guardrails for short-form, long-form, and product copy.";
-  if (/style\s+rules/i.test(text)) return "Rules that support our brand voice across every channel.";
-  if (/before.*after/i.test(text)) return "Real examples that show our guidelines in action.";
-  if (/word\s+list/i.test(text)) return "Preferred terms, words to avoid, and spelling conventions.";
-  return null;
+  return sectionCopy(headingText)?.description ?? null
 }
 
-/** Get eyebrow label for a section (uppercase category label like "BRAND IDENTITY SYSTEM") */
+/** Eyebrow label for a section (uppercase category label like "BRAND IDENTITY"). */
 export function getSectionEyebrow(headingText: string): string | null {
-  const text = headingText.trim();
-  const lower = text.toLowerCase();
-  if (lower.includes("about")) return "BRAND OVERVIEW";
-  if (lower.includes("how to use")) return "USAGE GUIDE";
-  if (/your\s+audience/i.test(text)) return "WHO YOU'RE WRITING FOR";
-  if (/content\s+guidelines/i.test(text)) return "FOUNDATION";
-  if (lower.includes("brand voice")) return "BRAND IDENTITY";
-  if (/style\s+rules/i.test(text)) return "STYLE RULES";
-  if (/before.*after/i.test(text)) return "EXAMPLES";
-  if (/word\s+list/i.test(text)) return "TERMINOLOGY";
-  return null;
+  return sectionCopy(headingText)?.eyebrow ?? null
 }

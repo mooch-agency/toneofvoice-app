@@ -2,7 +2,6 @@ import {
   LayoutTemplate,
   Info,
   HelpCircle,
-  FileText,
   Megaphone,
   ScrollText,
   ArrowLeftRight,
@@ -12,8 +11,9 @@ import {
   Mail,
   type LucideIcon
 } from "lucide-react"
+import type { Tier } from "./tiers"
 
-export type Tier = 'starter' | 'pro' | 'agency'  // starter = free plan
+export type { Tier }
 
 export interface SectionConfig {
   id: string
@@ -102,244 +102,141 @@ export interface StyleGuideSection {
   content: string
   level: number
   isMainSection: boolean
-  // New fields for sidebar
   configId?: string
   icon?: LucideIcon
   minTier?: Tier
 }
 
+/** Sections that older guides contain but the app no longer shows. */
+const DEPRECATED_HEADING = /^Content Guidelines$/i
+
+/** One H1/H2 section of the markdown, by character offsets. */
+interface SectionSpan {
+  id: string
+  title: string
+  level: number
+  config?: SectionConfig
+  start: number
+  contentStart: number
+  end: number
+}
+
 /**
- * Parse markdown content into sections for sidebar display.
- * Splits on ## (H2) headings, keeping content as raw markdown
- * so it can be fed directly into the editor.
+ * The single heading scanner. Parsing and replacing both use these spans,
+ * so skipped (deprecated) sections can never shift indexes (AI-8).
+ */
+function scanSections(markdown: string): SectionSpan[] {
+  const headingRegex = /^(#{1,2})\s+(.+)$/gm
+  const found: { level: number; title: string; start: number }[] = []
+  let match: RegExpExecArray | null
+  while ((match = headingRegex.exec(markdown)) !== null) {
+    found.push({ level: match[1].length, title: match[2].trim(), start: match.index })
+  }
+
+  return found.map((heading, i) => {
+    const lineEnd = markdown.indexOf("\n", heading.start)
+    const config = STYLE_GUIDE_SECTIONS.find((c) => c.matchHeading.test(heading.title))
+    return {
+      ...heading,
+      config,
+      id: config?.id || generateSectionId(heading.title) || `section-${i}`,
+      contentStart: lineEnd === -1 ? markdown.length : lineEnd + 1,
+      end: i + 1 < found.length ? found[i + 1].start : markdown.length,
+    }
+  })
+}
+
+/**
+ * Parse markdown into sections for the sidebar and editor.
+ * Splits on # and ## headings; content stays raw markdown (### blocks included).
  */
 export function parseStyleGuideContent(markdown: string): StyleGuideSection[] {
   if (!markdown) return []
-
-  const sections: StyleGuideSection[] = []
-
-  // Split on ## headings (H2). Capture the heading text.
-  // Regex: match lines starting with # or ## (not ###) 
-  const headingRegex = /^(#{1,2})\s+(.+)$/gm
-  const matches: { level: number; title: string; index: number }[] = []
-  let match: RegExpExecArray | null
-
-  while ((match = headingRegex.exec(markdown)) !== null) {
-    matches.push({
-      level: match[1].length,
-      title: match[2].trim(),
-      index: match.index
-    })
+  const spans = scanSections(markdown)
+  if (spans.length === 0) {
+    return [{ id: "content", title: "Style Guide", content: markdown.trim(), level: 2, isMainSection: true, minTier: "starter" }]
   }
 
-  if (matches.length === 0) {
-    // No headings found -- return all content as one section
-    return [{
-      id: 'content',
-      title: 'Style Guide',
-      content: markdown.trim(),
-      level: 2,
-      isMainSection: true,
-      minTier: 'starter'
-    }]
-  }
-
-  matches.forEach((heading, i) => {
-    // Skip deprecated sections (Content Guidelines was removed)
-    if (/^Content Guidelines$/i.test(heading.title)) {
-      return
-    }
-
-    // Content runs from end of this heading line to start of next heading (or end of string)
-    const headingLineEnd = markdown.indexOf('\n', heading.index)
-    const contentStart = headingLineEnd === -1 ? markdown.length : headingLineEnd + 1
-    const contentEnd = i + 1 < matches.length ? matches[i + 1].index : markdown.length
-    const content = markdown.slice(contentStart, contentEnd).trim()
-
-    // Match to a known section config; ensure id is never empty (breaks getElementById / keys)
-    const config = STYLE_GUIDE_SECTIONS.find(c => c.matchHeading.test(heading.title))
-    let id = config ? config.id : generateSectionId(heading.title)
-    if (!id) id = `section-${i}`
-
-    sections.push({
-      id,
-      title: heading.title,
-      content,
-      level: heading.level,
-      isMainSection: heading.level <= 2,
-      configId: config?.id,
-      icon: config?.icon,
-      minTier: config?.minTier || 'starter'
-    })
-  })
-
-  return sections
+  return spans
+    .filter((span) => !DEPRECATED_HEADING.test(span.title))
+    .map((span) => ({
+      id: span.id,
+      title: span.title,
+      content: markdown.slice(span.contentStart, span.end).trim(),
+      level: span.level,
+      isMainSection: span.level <= 2,
+      configId: span.config?.id,
+      icon: span.config?.icon,
+      minTier: span.config?.minTier || "starter",
+    }))
 }
 
-/**
- * Get section id from heading text (for H2 section IDs in editor).
- * Matches STYLE_GUIDE_SECTIONS or falls back to slug.
- */
+/** Section id for heading text: a known section id or a slug. */
 export function getSectionIdFromHeading(title: string): string {
   const config = STYLE_GUIDE_SECTIONS.find((c) => c.matchHeading.test(title))
   if (config) return config.id
-  const slug = generateSectionId(title)
-  return slug || "section"
+  return generateSectionId(title) || "section"
 }
 
-/**
- * Generate a URL-safe ID from section title
- */
 function generateSectionId(title: string): string {
   return title
     .toLowerCase()
-    .replace(/[^a-z0-9\s-]/g, '') // Remove special characters
-    .replace(/\s+/g, '-') // Replace spaces with hyphens
-    .replace(/-+/g, '-') // Replace multiple hyphens with single
-    .replace(/^-|-$/g, '') // Remove leading/trailing hyphens
+    .replace(/[^a-z0-9\s-]/g, "")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
 }
 
-/**
- * Get section content (heading + body) from full markdown by section id.
- * Uses parseStyleGuideContent to find section boundaries.
- * Returns empty string if section not found.
- */
-export function getSectionContentFromMarkdown(markdown: string, sectionId: string): string {
-  if (!markdown || !sectionId) return ""
-  const sections = parseStyleGuideContent(markdown)
-  const section = sections.find((s) => s.id === sectionId)
-  if (!section) return ""
-  return `## ${section.title}\n\n${section.content}`.trim()
-}
-
-/**
- * Build markdown suitable for pasting into AI tools (Brand Voice + Style Rules).
- * Used by "Copy for AI" post-export prompt.
- */
-export function getCopyForAIMarkdown(markdown: string): string {
+/** Body of a section (without its heading), or "" when the section is missing. */
+export function getSectionBody(markdown: string, sectionId: string): string {
   if (!markdown) return ""
-  const brandVoice = getSectionContentFromMarkdown(markdown, "brand-voice")
-  const styleRules = getSectionContentFromMarkdown(markdown, "style-rules")
-  const parts = [brandVoice, styleRules].filter(Boolean)
-  return parts.join("\n\n---\n\n")
+  const span = scanSections(markdown).find((s) => s.id === sectionId)
+  return span ? markdown.slice(span.contentStart, span.end).trim() : ""
 }
 
+const TRAILING_RULE = /(^|\n)---\s*$/
+
 /**
- * Replace a section's content in full markdown.
- * Finds section by id, replaces from ## Heading to next ## or end with newContent.
- * newContent should be the full section markdown (heading + body).
- * Returns original markdown if section not found.
+ * Replace a whole section (heading + body) with `newContent`.
+ * A `---` separator that ended the old section is kept.
+ * Returns the input unchanged when the section is not found.
  */
-export function replaceSectionInMarkdown(
-  markdown: string,
-  sectionId: string,
-  newContent: string
-): string {
+export function replaceSectionInMarkdown(markdown: string, sectionId: string, newContent: string): string {
   if (!markdown || !sectionId) return markdown
-  const sections = parseStyleGuideContent(markdown)
-  const section = sections.find((s) => s.id === sectionId)
-  if (!section) return markdown
+  const spans = scanSections(markdown)
+  if (spans.length === 0) return sectionId === "content" ? newContent.trim() : markdown
 
-  const headingRegex = /^(#{1,2})\s+(.+)$/gm
-  const matches: { level: number; title: string; index: number }[] = []
-  let match: RegExpExecArray | null
-  while ((match = headingRegex.exec(markdown)) !== null) {
-    matches.push({
-      level: match[1].length,
-      title: match[2].trim(),
-      index: match.index,
-    })
-  }
+  const span = spans.find((s) => s.id === sectionId)
+  if (!span) return markdown
 
-  const sectionIndex = sections.findIndex((s) => s.id === sectionId)
-  if (sectionIndex === -1) return markdown
-
-  // No headings: single "content" section
-  if (matches.length === 0) {
-    return sectionIndex === 0 ? newContent.trim() : markdown
-  }
-
-  const start = matches[sectionIndex].index
-  const end =
-    sectionIndex + 1 < matches.length ? matches[sectionIndex + 1].index : markdown.length
-  const before = markdown.slice(0, start)
-  const after = markdown.slice(end)
-  return before + newContent.trim() + (after ? "\n\n" + after : "")
+  const replacement = newContent.trim()
+  const keepRule = TRAILING_RULE.test(markdown.slice(span.start, span.end)) && !TRAILING_RULE.test(replacement)
+  const before = markdown.slice(0, span.start)
+  const after = markdown.slice(span.end)
+  return before + replacement + (keepRule ? "\n\n---" : "") + (after ? "\n\n" + after : "")
 }
 
 /**
- * Merge editable markdown (from single editor) back into full markdown.
- * Replaces content of unlocked sections with corresponding sections from editableMarkdown.
- */
-export function mergeEditableIntoFullMarkdown(
-  fullMarkdown: string,
-  editableMarkdown: string,
-  unlockedSectionIds: string[]
-): string {
-  if (!fullMarkdown || !editableMarkdown) return fullMarkdown
-  const editableSections = parseStyleGuideContent(editableMarkdown)
-  let result = fullMarkdown
-  for (let i = 0; i < unlockedSectionIds.length && i < editableSections.length; i++) {
-    const sec = editableSections[i]
-    const newContent = `## ${sec.title}\n\n${sec.content}`.trim()
-    result = replaceSectionInMarkdown(result, unlockedSectionIds[i], newContent)
-  }
-  return result
-}
-
-/**
- * Insert a custom section into the markdown, before the Questions/Contact section.
- * Returns the updated markdown. Returns original if title is empty.
- * Max 5 custom sections allowed (sections not matching any STYLE_GUIDE_SECTIONS config).
+ * Insert a custom section before the Questions/Contact section.
+ * At most 5 custom sections (headings that match no known section); titles capped at 60 chars.
  */
 export function insertCustomSection(markdown: string, title: string): string {
   const trimmed = title.trim().slice(0, 60)
   if (!trimmed || !markdown) return markdown
 
-  // Count existing custom sections (not matching any known config)
-  const sections = parseStyleGuideContent(markdown)
-  const customCount = sections.filter(s => !s.configId).length
+  const customCount = parseStyleGuideContent(markdown).filter((s) => !s.configId).length
   if (customCount >= 5) return markdown
 
-  const newSection = `\n\n## ${trimmed}\n\nStart writing here...\n\n`
-
-  // Insert before Questions/Contact section
+  const newSection = `## ${trimmed}\n\nStart writing here...\n\n`
   const contactMatch = /^## (Questions\?|Get in Touch|Contact)/im.exec(markdown)
   if (contactMatch) {
-    const insertPos = contactMatch.index
-    return markdown.slice(0, insertPos) + newSection.trimStart() + markdown.slice(insertPos)
+    return markdown.slice(0, contactMatch.index) + newSection + markdown.slice(contactMatch.index)
   }
-
-  return markdown + newSection
+  return `${markdown}\n\n${newSection}`
 }
 
-/**
- * Build editable markdown from sections (free tiers only, no cover).
- */
+/** Editable markdown from the sections the user can see (no cover). */
 export function buildEditableMarkdown(sections: StyleGuideSection[], isUnlocked: (minTier?: Tier) => boolean): string {
   const editable = sections.filter((s) => s.id !== "cover" && isUnlocked(s.minTier))
   return editable.map((s) => `## ${s.title}\n\n${s.content}`.trim()).join("\n\n")
-}
-
-/**
- * Get default open sections based on content type
- */
-export function getDefaultOpenSections(sections: StyleGuideSection[]): string[] {
-  const defaults: string[] = []
-  
-  // Always open the first section
-  if (sections.length > 0) {
-    defaults.push(sections[0].id)
-  }
-  
-  // Open "Brand Voice" section if it exists
-  const brandVoiceSection = sections.find(section => 
-    section.title.toLowerCase().includes('brand voice') ||
-    section.title.toLowerCase().includes('voice')
-  )
-  if (brandVoiceSection) {
-    defaults.push(brandVoiceSection.id)
-  }
-  
-  return defaults
 }
