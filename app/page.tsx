@@ -11,6 +11,8 @@ import FaqSection from "@/components/landing/faq-section"
 import TestimonialsSection from "@/components/testimonials-section"
 import FinalCtaSection from "@/components/landing/final-cta-section"
 
+export const metadata = { alternates: { canonical: "/" } }
+
 export default function LandingPage() {
   return (
     <div className="flex min-h-screen flex-col">

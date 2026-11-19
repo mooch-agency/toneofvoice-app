@@ -66,9 +66,13 @@ export const metadata = {
       'max-snippet': -1,
     },
   },
-  verification: {
-    google: 'google-site-verification-code-here',
-  },
+}
+
+export const viewport = {
+  width: "device-width",
+  initialScale: 1,
+  maximumScale: 5,
+  themeColor: "#ffffff",
 }
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
@@ -88,13 +92,6 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           }}
         />
         
-        {/* Explicit meta tags for compatibility */}
-        <title>Define your brand tone of voice | Tone of Voice</title>
-        <meta name="description" content="Generate a professional tone of voice guide - traits, rules, and examples - tailored to your brand." />
-        <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=5" />
-        <meta name="theme-color" content="#ffffff" />
-        <link rel="canonical" href="https://toneofvoice.app" />
-
         {/* WebPage Schema */}
         <script
           type="application/ld+json"

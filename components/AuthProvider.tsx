@@ -12,6 +12,30 @@ type AuthContextValue = {
   signOut: () => Promise<void>;
 };
 
+/** localStorage keys holding one visitor's in-progress brand/guide drafts. */
+const APP_STORAGE_KEYS = [
+  "brandDetails",
+  "previewContent",
+  "generatedStyleGuide",
+  "selectedTraits",
+  "suggestedTraits",
+  "brandKeywords",
+  "emailCapture",
+  "savedGuideId",
+];
+
+/** Remove drafts so the next person on a shared browser doesn't inherit them (FE-9). */
+function clearAppStorage() {
+  try {
+    APP_STORAGE_KEYS.forEach((k) => localStorage.removeItem(k));
+    Object.keys(localStorage)
+      .filter((k) => k.startsWith("guide-edits-"))
+      .forEach((k) => localStorage.removeItem(k));
+  } catch {
+    // storage unavailable
+  }
+}
+
 const AuthContext = React.createContext<AuthContextValue | null>(null);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
@@ -92,7 +116,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const signOut = React.useCallback(async () => {
     const supabase = createClient();
-    await supabase.auth.signOut();
+    try {
+      await supabase.auth.signOut();
+    } finally {
+      clearAppStorage();
+    }
     window.location.href = "/";
   }, []);
 

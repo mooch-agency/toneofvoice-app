@@ -1,7 +1,6 @@
 "use client"
 
 import { useAuth } from "@/components/AuthProvider"
-import { createClient } from "@/lib/supabase-browser"
 import { useRouter, usePathname } from "next/navigation"
 import {
   DropdownMenu,
@@ -16,17 +15,11 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 import { User, CreditCard, LogOut, ChevronDown } from "lucide-react"
 
 export function UserMenu() {
-  const { user } = useAuth()
+  const { user, signOut } = useAuth()
   const router = useRouter()
   const pathname = usePathname()
 
   if (!user) return null
-
-  const handleLogout = async () => {
-    const supabase = createClient()
-    await supabase.auth.signOut()
-    router.push('/')
-  }
 
   const getUserInitials = (email?: string) => {
     if (!email) return 'U'
@@ -73,7 +66,7 @@ export function UserMenu() {
           </DropdownMenuItem>
         )}
         <DropdownMenuSeparator />
-        <DropdownMenuItem onClick={handleLogout} className="text-red-600 focus:text-red-600">
+        <DropdownMenuItem onClick={signOut} className="text-red-600 focus:text-red-600">
           <LogOut className="mr-2 h-4 w-4" />
           Log out
         </DropdownMenuItem>
