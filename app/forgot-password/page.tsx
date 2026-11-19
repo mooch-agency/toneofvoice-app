@@ -82,6 +82,8 @@ export default function ForgotPasswordPage() {
           <div className="relative">
             <Mail className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
             <input
+              aria-label="Email"
+              autoComplete="email"
               placeholder="Email"
               type="email"
               value={email}
