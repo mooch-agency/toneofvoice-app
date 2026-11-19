@@ -75,6 +75,25 @@ export function parseBrandDetails(input: unknown): ParseResult<BrandDetails> {
   return result.success ? { ok: true, data: result.data } : { ok: false, error: firstError(result.error) }
 }
 
+/**
+ * Brand details already saved with a guide. Older rows may have an empty or
+ * very long name, more traits or a longer description than new input allows;
+ * clamp them rather than refusing to expand a paying user's guide.
+ */
+export function parseStoredBrandDetails(
+  stored: Record<string, unknown> | null | undefined,
+  fallbackName: string | null | undefined,
+): ParseResult<BrandDetails> {
+  const raw = (withLegacyDescription(stored ?? {}) as Record<string, unknown>) ?? {}
+  const str = (v: unknown) => (typeof v === "string" ? v.trim() : "")
+  const name = (str(raw.name) || str(fallbackName) || "Brand").slice(0, 80)
+  const description = str(raw.brandDetailsDescription).slice(0, 2500)
+  const traits = (Array.isArray(raw.traits) ? traitNames(raw.traits) : [])
+    .map((t) => t.slice(0, 40))
+    .slice(0, MAX_TRAITS)
+  return parseBrandDetails({ ...raw, name, brandDetailsDescription: description, traits })
+}
+
 export type JsonBodyResult = { ok: true; body: unknown } | { ok: false; status: 400 | 413; error: string }
 
 /** Read a JSON request body, rejecting bodies over `maxBytes` (413) and invalid JSON (400). */

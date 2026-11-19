@@ -182,7 +182,14 @@ export const renderFullGuideFromPreview = traceable(
       const body = getSectionBody(merged, section.id).replace(section.placeholder, () => content[section.id])
       merged = replaceSectionBody(merged, section.id, body)
     }
-    merged = replaceSectionBody(merged, "contact", contactSection(brandDetails.name, userEmail))
+    // Fill in the user's email only while the contact section is still our
+    // default text; never overwrite contact details the user wrote.
+    const norm = (t: string) => t.replace(/\s+/g, " ").trim()
+    const currentContact = norm(getSectionBody(merged, "contact"))
+    const defaults = [contactSection(brandDetails.name, null), contactSection(brandDetails.name, userEmail)].map(norm)
+    if (defaults.includes(currentContact)) {
+      merged = replaceSectionBody(merged, "contact", contactSection(brandDetails.name, userEmail))
+    }
 
     logFailures("expand", failed)
     return { markdown: merged, failedSections: failed }

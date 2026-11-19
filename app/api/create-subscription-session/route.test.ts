@@ -8,8 +8,10 @@ const h = vi.hoisted(() => ({
     checkout: { sessions: { create: vi.fn() } },
     billingPortal: { sessions: { create: vi.fn() } },
     subscriptions: { list: vi.fn() },
+    customers: { create: vi.fn() },
   },
   userClient: null as unknown,
+  admin: null as unknown,
   MissingSupabaseConfigError: class extends Error {},
 }))
 
@@ -18,11 +20,12 @@ vi.mock("@/lib/supabase-server", () => ({
   createClient: async () => h.userClient,
   MissingSupabaseConfigError: h.MissingSupabaseConfigError,
 }))
-vi.mock("@/lib/supabase-admin", () => ({ getSupabaseAdmin: () => ({}) }))
+vi.mock("@/lib/supabase-admin", () => ({ getSupabaseAdmin: () => h.admin }))
 
 import { POST } from "./route"
 
 let profile: Record<string, unknown> | null
+let adminWrites: { table: string; payload: unknown; filters: Record<string, unknown> }[]
 
 function setUser(user: { id: string; email?: string } | null = { id: "u1", email: "a@b.co" }) {
   h.userClient = fakeSupabase((q) => (q.table === "profiles" ? { data: profile } : {}), user).client
@@ -41,6 +44,12 @@ beforeEach(() => {
   h.stripe.checkout.sessions.create.mockReset().mockResolvedValue({ id: "cs_1", url: "https://checkout/cs_1" })
   h.stripe.billingPortal.sessions.create.mockReset().mockResolvedValue({ url: "https://portal/x" })
   h.stripe.subscriptions.list.mockReset().mockResolvedValue({ data: [] })
+  h.stripe.customers.create.mockReset().mockResolvedValue({ id: "cus_new" })
+  adminWrites = []
+  h.admin = fakeSupabase((q) => {
+    if (q.op === "update") adminWrites.push({ table: q.table, payload: q.payload, filters: q.filters })
+    return { data: [{ id: "u1" }] }
+  }).client
   profile = { stripe_customer_id: null }
   vi.spyOn(console, "error").mockImplementation(() => {})
   setUser()
@@ -72,12 +81,24 @@ describe("checkout", () => {
     expect(args).toMatchObject({
       mode: "subscription",
       line_items: [{ price: "price_pro", quantity: 1 }],
-      customer_email: "a@b.co",
+      customer: "cus_new",
       client_reference_id: "u1",
       metadata: { user_id: "u1", plan: "pro" },
       subscription_data: { metadata: { user_id: "u1", plan: "pro" } },
       success_url: "https://toneofvoice.app/dashboard?subscription=success&session_id={CHECKOUT_SESSION_ID}",
     })
+  })
+
+  it("creates one Stripe customer per user up front, so parallel first checkouts share it", async () => {
+    await post({ plan: "pro" })
+    expect(h.stripe.customers.create).toHaveBeenCalledWith(
+      expect.objectContaining({ email: "a@b.co", metadata: { user_id: "u1" } }),
+      expect.objectContaining({ idempotencyKey: "customer:u1" }),
+    )
+    expect(adminWrites).toEqual([
+      expect.objectContaining({ table: "profiles", payload: { stripe_customer_id: "cus_new" } }),
+    ])
+    expect(h.stripe.checkout.sessions.create.mock.calls[0][0]).not.toHaveProperty("customer_email")
   })
 
   it("reuses the existing Stripe customer instead of creating a new one (SEC-8)", async () => {
@@ -86,6 +107,7 @@ describe("checkout", () => {
     const args = h.stripe.checkout.sessions.create.mock.calls[0][0]
     expect(args.customer).toBe("cus_1")
     expect(args).not.toHaveProperty("customer_email")
+    expect(h.stripe.customers.create).not.toHaveBeenCalled()
     expect(h.stripe.subscriptions.list).toHaveBeenCalledWith(expect.objectContaining({ customer: "cus_1" }))
   })
 

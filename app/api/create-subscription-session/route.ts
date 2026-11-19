@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server"
 import { requireUser, tooManyRequests } from "@/lib/api-auth"
 import { clientKey, rateLimit } from "@/lib/rate-limit"
+import { getSupabaseAdmin } from "@/lib/supabase-admin"
 import {
   LIVE_STATUSES,
   appUrl,
@@ -42,12 +43,25 @@ export async function POST(req: Request) {
       .select("stripe_customer_id")
       .eq("id", user.id)
       .single()
-    const customerId = typeof profile?.stripe_customer_id === "string" ? profile.stripe_customer_id : null
-
     const stripe = getStripe()
     const base = appUrl()
 
-    if (customerId && (await findSubscription(customerId, LIVE_STATUSES))) {
+    let customerId = typeof profile?.stripe_customer_id === "string" ? profile.stripe_customer_id : null
+    if (!customerId) {
+      // One customer per user. The idempotency key makes parallel first-time
+      // checkouts (two tabs, double clicks) get the same customer, and the
+      // live-subscription check below then stops a second subscription.
+      const customer = await stripe.customers.create(
+        { email: user.email ?? undefined, metadata: { user_id: user.id } },
+        { idempotencyKey: `customer:${user.id}` },
+      )
+      customerId = customer.id
+      const { error } = await getSupabaseAdmin()
+        .from("profiles")
+        .update({ stripe_customer_id: customerId })
+        .eq("id", user.id)
+      if (error) throw new Error(`Could not store Stripe customer: ${error.message ?? "unknown"}`)
+    } else if (await findSubscription(customerId, LIVE_STATUSES)) {
       const portal = await stripe.billingPortal.sessions.create({
         customer: customerId,
         return_url: `${base}/dashboard/billing`,
@@ -68,7 +82,7 @@ export async function POST(req: Request) {
       client_reference_id: user.id,
       metadata,
       subscription_data: { metadata },
-      ...(customerId ? { customer: customerId } : { customer_email: user.email ?? undefined }),
+      customer: customerId,
     })
 
     return NextResponse.json({ url: session.url })

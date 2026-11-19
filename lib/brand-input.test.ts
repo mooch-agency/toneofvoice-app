@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest"
-import { BrandDetailsInput, parseBrandDetails, parsePreviewRequest, readJsonBody } from "./brand-input"
+import { BrandDetailsInput, parseBrandDetails, parsePreviewRequest, parseStoredBrandDetails, readJsonBody } from "./brand-input"
 
 const valid = {
   name: "Acme",
@@ -129,5 +129,32 @@ describe("parsePreviewRequest", () => {
   it("rejects a missing brandDetails object and too many selected traits", () => {
     expect(parsePreviewRequest({}).ok).toBe(false)
     expect(parsePreviewRequest({ brandDetails: valid, selectedTraits: ["a", "b", "c", "d"] }).ok).toBe(false)
+  })
+})
+
+describe("parseStoredBrandDetails (data already saved with a guide)", () => {
+  const stored = { brandDetailsDescription: "We make anvils.", traits: ["Warm"] }
+
+  it("falls back to the guide's brand name when the stored name is empty", () => {
+    const r = parseStoredBrandDetails({ ...stored, name: "" }, "Acme")
+    expect(r.ok && r.data.name).toBe("Acme")
+  })
+
+  it("shortens an over-long name instead of rejecting a paying user's guide", () => {
+    const r = parseStoredBrandDetails({ ...stored, name: "A".repeat(200) }, "Acme")
+    expect(r.ok && r.data.name).toHaveLength(80)
+  })
+
+  it("keeps at most 3 traits and trims long descriptions", () => {
+    const r = parseStoredBrandDetails(
+      { name: "Acme", brandDetailsDescription: "x".repeat(3000), traits: ["A", "B", "C", "D"] },
+      null,
+    )
+    expect(r.ok && r.data.traits).toEqual(["A", "B", "C"])
+    expect(r.ok && r.data.brandDetailsDescription).toHaveLength(2500)
+  })
+
+  it("still fails without any description", () => {
+    expect(parseStoredBrandDetails({ name: "Acme" }, "Acme").ok).toBe(false)
   })
 })

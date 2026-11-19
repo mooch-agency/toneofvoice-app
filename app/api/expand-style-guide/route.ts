@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server"
 import { requireUser, tooManyRequests, withRouteErrors } from "@/lib/api-auth"
-import { parseBrandDetails, readJsonBody } from "@/lib/brand-input"
+import { parseStoredBrandDetails, readJsonBody } from "@/lib/brand-input"
 import { hasUnlockPlaceholders } from "@/lib/guide-placeholders"
 import Logger from "@/lib/logger"
 import { clientKey, rateLimit } from "@/lib/rate-limit"
@@ -63,7 +63,7 @@ export async function POST(req: Request) {
     }
 
     const stored = (guide.brand_details as Record<string, unknown> | null) ?? {}
-    const details = parseBrandDetails({ name: guide.brand_name, ...stored })
+    const details = parseStoredBrandDetails(stored, guide.brand_name)
     if (!details.ok) {
       return NextResponse.json({ error: "This guide's brand details are incomplete, so it cannot be expanded." }, { status: 400 })
     }

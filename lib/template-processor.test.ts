@@ -18,7 +18,7 @@ vi.mock("./openai", () => ({
 }))
 
 import { PLACEHOLDERS, hasUnlockPlaceholders } from "./guide-placeholders"
-import { parseStyleGuideContent } from "./content-parser"
+import { parseStyleGuideContent, replaceSectionBody } from "./content-parser"
 import type { BrandDetails } from "./brand-input"
 import {
   contactSection,
@@ -190,6 +190,14 @@ describe("renderFullGuideFromPreview", () => {
     const { markdown } = await renderFullGuideFromPreview({ previewContent, brandDetails: brand, userEmail: "a@b.co" })
     expect(markdown).toContain("**Contact:** a@b.co")
     expect(markdown.match(/^## Questions\?/gm)).toHaveLength(1)
+  })
+
+  it("keeps a contact section the user edited", async () => {
+    const custom = "Email voice@acme.test or ask in #brand."
+    const previewContent = replaceSectionBody(await preview(), "contact", custom)
+    const { markdown } = await renderFullGuideFromPreview({ previewContent, brandDetails: brand, userEmail: "a@b.co" })
+    expect(markdown).toContain(custom)
+    expect(markdown).not.toContain("**Contact:** a@b.co")
   })
 
   it("only generates sections that are still locked", async () => {

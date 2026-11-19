@@ -131,5 +131,6 @@ Merge WP branches, run all gates and `next build`, run an independent review (`/
 
 - Review and apply `supabase/migrations/002_security_hardening.sql`.
 - Set `WEBFLOW_WEBHOOK_SECRET` (and in Zapier) if Webflow publishing is still used.
-- Set the Stripe webhook endpoint's API version to match `lib/stripe.ts`.
+- Set the Stripe webhook endpoint's API version to `2025-03-31.basil` (matches `lib/stripe.ts`) and subscribe it to `checkout.session.completed`, `customer.subscription.updated` and `customer.subscription.deleted`.
+- In Stripe Billing Portal settings, turn on plan switching between Pro and Agency. Upgrades and "manage" links go through the portal.
 - Rotate the old `ADMIN_BLOG_PASSWORD` wherever it is reused (SEC-19). The deleted `docs/SECURITY_REVIEW.md` held it in plain text, so it is still in git history.
