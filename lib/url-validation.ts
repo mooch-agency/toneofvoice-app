@@ -9,9 +9,10 @@ import { isIP } from "node:net"
  * hostname shape, IP-literal ranges). `assertPublicHttpUrl` adds a DNS check:
  * every address the host resolves to must be public.
  *
- * Residual risk: the fetch does its own DNS lookup, so a host that changes its
- * answer between our check and the fetch (DNS rebinding) is not fully covered.
- * Callers must also re-validate every redirect hop.
+ * These checks alone do not stop DNS rebinding: a client that does its own DNS
+ * lookup can get a different answer than this check did. Fetch user-supplied
+ * URLs with `safeGet` (lib/safe-fetch.ts), which validates the address the
+ * socket actually connects to. Callers must also re-validate every redirect hop.
  */
 
 export class UnsafeUrlError extends Error {

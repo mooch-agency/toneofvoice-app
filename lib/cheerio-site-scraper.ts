@@ -1,6 +1,7 @@
 import "server-only"
 import * as cheerio from "cheerio"
-import { assertPublicHttpUrl, isSameSite } from "./url-validation"
+import { safeGet } from "./safe-fetch"
+import { assertPublicHttpUrl, isSameSite, type LookupFn } from "./url-validation"
 
 // Homepage context is optional, so both fetches are hard-capped. Without a
 // timeout, sites that tarpit datacenter IPs rather than rejecting them (e.g.
@@ -25,56 +26,51 @@ const BROWSER_HEADERS = {
 export interface ScrapeOptions {
   /** Throws for URLs that must not be fetched. Runs before every request, including redirects. */
   assertUrl?: (url: URL) => Promise<unknown>
+  /** Resolver used for the connection itself. Defaults to the system resolver. */
+  lookup?: LookupFn
+  /** Which addresses the socket may connect to. Defaults to public unicast only. */
+  isAllowedAddress?: (address: string) => boolean
 }
 
 const defaultAssertUrl = (url: URL) => assertPublicHttpUrl(url)
 
 /**
- * Fetch HTML with SSRF checks on every hop. Returns null for error statuses
- * and non-HTML responses; throws for unsafe URLs, timeouts and redirect loops.
+ * Fetch HTML with SSRF checks on every hop: `assertUrl` vets each URL, and
+ * `safeGet` re-checks the address it actually connects to (DNS rebinding).
+ * Returns null for error statuses and non-HTML responses; throws for unsafe
+ * URLs, timeouts and redirect loops.
  */
 async function fetchHtml(
   start: URL,
   timeoutMs: number,
-  assertUrl: (url: URL) => Promise<unknown>,
+  opts: ScrapeOptions,
 ): Promise<{ html: string; url: URL } | null> {
+  const assertUrl = opts.assertUrl ?? defaultAssertUrl
+  // One deadline for the whole redirect chain.
   const signal = AbortSignal.timeout(timeoutMs)
   let url = start
   for (let hop = 0; ; hop++) {
     await assertUrl(url)
-    const res = await fetch(url, { signal, redirect: "manual", headers: BROWSER_HEADERS })
+    const res = await safeGet(url, {
+      timeoutMs,
+      maxBytes: MAX_BODY_BYTES,
+      signal,
+      headers: BROWSER_HEADERS,
+      lookup: opts.lookup,
+      isAllowedAddress: opts.isAllowedAddress,
+    })
     const location = res.headers.get("location")
     if (res.status >= 300 && res.status < 400 && location) {
-      await res.body?.cancel()
       if (hop >= MAX_REDIRECTS) throw new Error("Too many redirects")
       url = new URL(location, url)
       continue
     }
     const contentType = res.headers.get("content-type") ?? ""
-    if (!res.ok || !/text\/html|application\/xhtml\+xml/i.test(contentType)) {
-      await res.body?.cancel()
+    if (res.status < 200 || res.status >= 300 || !/text\/html|application\/xhtml\+xml/i.test(contentType)) {
       return null
     }
-    return { html: await readCapped(res, MAX_BODY_BYTES), url }
+    return { html: res.body, url }
   }
-}
-
-/** Read at most `maxBytes` of the body, then stop the download. */
-async function readCapped(res: Response, maxBytes: number): Promise<string> {
-  if (!res.body) return ""
-  const reader = res.body.getReader()
-  const decoder = new TextDecoder()
-  let received = 0
-  let text = ""
-  while (received < maxBytes) {
-    const { done, value } = await reader.read()
-    if (done) break
-    const chunk = value.subarray(0, maxBytes - received)
-    received += chunk.byteLength
-    text += decoder.decode(chunk, { stream: true })
-  }
-  await reader.cancel().catch(() => {})
-  return text + decoder.decode()
 }
 
 /** Visible text summary of a page: title, meta description, first headings, body copy. */
@@ -112,8 +108,7 @@ function findSubpageLink($: cheerio.CheerioAPI, base: URL): URL | null {
  * subpage is only fetched after the homepage resolves.
  */
 export async function fetchAndExtractWithCheerio(url: string, opts: ScrapeOptions = {}): Promise<string> {
-  const assertUrl = opts.assertUrl ?? defaultAssertUrl
-  const home = await fetchHtml(new URL(url), HOMEPAGE_FETCH_TIMEOUT_MS, assertUrl)
+  const home = await fetchHtml(new URL(url), HOMEPAGE_FETCH_TIMEOUT_MS, opts)
   if (!home) return ""
 
   const $ = cheerio.load(home.html)
@@ -122,7 +117,7 @@ export async function fetchAndExtractWithCheerio(url: string, opts: ScrapeOption
 
   if (subUrl) {
     try {
-      const sub = await fetchHtml(subUrl, SUBPAGE_FETCH_TIMEOUT_MS, assertUrl)
+      const sub = await fetchHtml(subUrl, SUBPAGE_FETCH_TIMEOUT_MS, opts)
       if (sub) parts.push(`\n[Subpage: ${sub.url.href}]\n${pageSummary(cheerio.load(sub.html), 1500).join("\n")}`)
     } catch {
       // A failed subpage must not sink the homepage content we already have.

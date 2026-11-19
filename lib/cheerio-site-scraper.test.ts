@@ -11,11 +11,15 @@ import {
   SUBPAGE_FETCH_TIMEOUT_MS,
   fetchAndExtractWithCheerio,
 } from "./cheerio-site-scraper"
-import { UnsafeUrlError } from "./url-validation"
+import { UnsafeUrlError, assertPublicHttpUrl, type LookupFn } from "./url-validation"
 
-// The default validator rejects 127.0.0.1, so tests that talk to a local
-// server swap in a validator that treats the test servers as public.
-const allowAll = { assertUrl: async (u: URL) => u }
+// The default validators reject 127.0.0.1, so tests that talk to a local
+// server swap in validators that treat the test servers as public: one for the
+// pre-request URL check and one for the address the socket connects to.
+const allowAll = { assertUrl: async (u: URL) => u, isAllowedAddress: () => true }
+
+const loopbackLookup: LookupFn = async () => [{ address: "127.0.0.1", family: 4 }]
+const publicLookup: LookupFn = async () => [{ address: "93.184.216.34", family: 4 }]
 
 const servers: Server[] = []
 
@@ -240,5 +244,56 @@ describe("fetchAndExtractWithCheerio", () => {
     expect(out).toContain("start of page")
     expect(out).not.toContain("LATE-MARKER")
     expect(out.length).toBeLessThanOrEqual(7000)
+  })
+
+  it("refuses a private address at connect time even when the URL check is bypassed", async () => {
+    const hits: string[] = []
+    const base = await startServer((req, res) => {
+      hits.push(req.url ?? "")
+      res.writeHead(200, { "Content-Type": "text/html" })
+      res.end(PAGE)
+    })
+
+    const opts = { assertUrl: async (u: URL) => u }
+    await expect(fetchAndExtractWithCheerio(base + "/", opts)).rejects.toThrow(UnsafeUrlError)
+    expect(hits).toEqual([])
+  })
+
+  it("is not fooled by DNS rebinding between the URL check and the connection", async () => {
+    const hits: string[] = []
+    const base = await startServer((req, res) => {
+      hits.push(req.url ?? "")
+      res.writeHead(200, { "Content-Type": "text/html" })
+      res.end("<title>SECRET-INTERNAL-TOKEN</title>")
+    })
+    const port = new URL(base).port
+    // The check sees a public answer; the connection-time lookup sees loopback.
+    const opts = {
+      assertUrl: (u: URL) => assertPublicHttpUrl(new URL(u.href.replace(`:${port}`, "")), { lookup: publicLookup }),
+      lookup: loopbackLookup,
+    }
+
+    await expect(fetchAndExtractWithCheerio(`http://rebind.example:${port}/`, opts)).rejects.toThrow(UnsafeUrlError)
+    expect(hits).toEqual([])
+  })
+
+  it("connects to the address its own lookup validated", async () => {
+    let hostHeader = ""
+    const base = await startServer((req, res) => {
+      hostHeader = req.headers.host ?? ""
+      res.writeHead(200, { "Content-Type": "text/html" })
+      res.end(PAGE)
+    })
+    const port = new URL(base).port
+
+    const out = await fetchAndExtractWithCheerio(`http://acme.test:${port}/`, {
+      ...allowAll,
+      lookup: loopbackLookup,
+      isAllowedAddress: (a: string) => a === "127.0.0.1",
+    })
+
+    expect(out).toContain("Acme Corp")
+    expect(out).toContain("[Subpage: http://acme.test:" + port + "/about]")
+    expect(hostHeader).toBe(`acme.test:${port}`)
   })
 })
