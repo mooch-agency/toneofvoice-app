@@ -1,45 +1,37 @@
-// Renderer to convert validated JSON rules to markdown format
+// Renders validated JSON rules to the Style Rules markdown. Output is final:
+// it is not passed through any other formatter (AI-5).
 
-import { StyleRule } from './rules-schema';
+import type { StyleRule } from "./rules-schema"
 
-/** Fix common model output quirks: quote spacing, orphan chars, time format */
-function sanitizeRuleText(text: string): string {
-  if (!text || typeof text !== 'string') return '';
+/** Fix common model output quirks: quote spacing, stray characters, "10: 00" times. */
+export function sanitizeRuleText(text: string): string {
+  if (!text || typeof text !== "string") return ""
   return text
-    .replace(/\uFFFD/g, '') // Strip replacement char (emoji/Unicode corruption)
-    .replace(/[\uFE00-\uFE0F\u200B-\u200D\u2060]/g, '') // Variation selectors, zero-width
-    .replace(/([a-zA-Z0-9])"([a-zA-Z0-9/])/g, '$1 "$2') // Add space before opening " (Click"Create -> Click "Create)
-    .replace(/(\d+):\s+(\d+)/g, '$1:$2') // Fix 10: 00 -> 10:00
-    .replace(/\n+/g, ' ') // Collapse stray newlines to space
-    .trim();
+    .replace(/�/g, "") // replacement char (emoji/Unicode corruption)
+    .replace(/[︀-️​-‍⁠]/g, "") // variation selectors, zero-width
+    .replace(/([a-zA-Z0-9])"([a-zA-Z0-9/])/g, '$1 "$2') // Click"Create -> Click "Create
+    .replace(/(\d+):\s+(\d+)/g, "$1:$2") // 10: 00 -> 10:00
+    .replace(/\s*\n+\s*/g, " ") // stray newlines
+    .trim()
 }
+
+const italic = (text: string) => (text ? `*${text.replace(/\*/g, "\\*")}*` : "")
 
 /**
- * Render an array of style rules to markdown format
- * Format: ### N. Title
- *         Description line
- *         ✅ Good example
- *         ❌ Bad example
+ * ### N. Title
+ * Description
+ * ✅ *Good example*
+ * ❌ *Bad example*
  */
 export function renderRulesMarkdown(rules: StyleRule[]): string {
-  if (!rules || rules.length === 0) {
-    return '';
-  }
-
   return rules
-    .map((rule, index) => {
-      const number = index + 1;
-      const desc = sanitizeRuleText(rule.description);
-      const good = sanitizeRuleText(rule.examples?.good ?? '');
-      const bad = sanitizeRuleText(rule.examples?.bad ?? '');
-      const lines = [
-        `### ${number}. ${rule.title}`,
-        desc,
-        `✅ ${good}`,
-        `❌ ${bad}`,
-      ];
-      return lines.join('\n');
-    })
-    .join('\n\n');
+    .map((rule, index) =>
+      [
+        `### ${index + 1}. ${sanitizeRuleText(rule.title)}`,
+        sanitizeRuleText(rule.description),
+        `✅ ${italic(sanitizeRuleText(rule.examples.good))}`,
+        `❌ ${italic(sanitizeRuleText(rule.examples.bad))}`,
+      ].join("\n"),
+    )
+    .join("\n\n")
 }
-
