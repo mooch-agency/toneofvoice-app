@@ -1,3 +1,4 @@
+import "server-only"
 /**
  * Single Stripe module: client, price/plan mapping and the one function that
  * writes a subscription onto a profile. Nothing here talks to Stripe or reads

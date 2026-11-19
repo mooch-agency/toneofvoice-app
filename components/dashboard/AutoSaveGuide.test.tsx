@@ -23,6 +23,7 @@ describe("AutoSaveGuide", () => {
     refresh.mockReset()
     localStorage.setItem("brandDetails", JSON.stringify({ name: "Acme" }))
     localStorage.setItem("previewContent", "## About\n\nText.")
+    localStorage.setItem("draftCreatedAt", String(Date.now()))
     fetchMock = vi.fn()
     vi.stubGlobal("fetch", fetchMock)
   })
@@ -51,6 +52,14 @@ describe("AutoSaveGuide", () => {
     const body = JSON.parse(fetchMock.mock.calls[0][1].body)
     expect(body).toMatchObject({ title: "Acme Style Guide", brand_name: "Acme", content_md: "## About\n\nText." })
     expect(toast).not.toHaveBeenCalled()
+  })
+
+  it("never saves a stale draft left by someone else (FE-9)", async () => {
+    localStorage.setItem("draftCreatedAt", String(Date.now() - 25 * 60 * 60 * 1000))
+    render(<AutoSaveGuide />)
+    await new Promise((r) => setTimeout(r, 0))
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(localStorage.getItem("previewContent")).toBeNull()
   })
 
   it("does nothing without a stored preview", async () => {

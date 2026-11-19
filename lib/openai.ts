@@ -1,3 +1,4 @@
+import "server-only"
 import type { ChatCompletion, ChatCompletionCreateParamsNonStreaming } from "openai/resources/chat/completions"
 import Logger from "./logger"
 import { getOpenAIClient } from "./langsmith-openai"

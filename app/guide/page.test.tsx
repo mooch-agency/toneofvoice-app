@@ -89,4 +89,18 @@ describe("/guide", () => {
     expect(await screen.findByRole("button", { name: /generate full guide/i })).toBeInTheDocument()
     expect(fetchMock.mock.calls.map(([url]) => url)).not.toContain("/api/user-subscription-tier")
   })
+
+  it("offers Ask AI to signed-in starter users too, as an upgrade path", async () => {
+    authState.user = { id: "u1" }
+    params = new URLSearchParams("guideId=g1")
+    fetchMock.mockImplementation((url: string) =>
+      Promise.resolve(
+        url.startsWith("/api/load-style-guide")
+          ? json({ id: "g1", content_md: GUIDE, brand_name: "Acme", plan_type: "core", subscription_tier: "starter" })
+          : json({}, 404)
+      )
+    )
+    render(<GuidePage />)
+    expect(await screen.findByText(/to rewrite any section instantly/)).toBeInTheDocument()
+  })
 })

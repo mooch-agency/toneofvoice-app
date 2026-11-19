@@ -1,6 +1,7 @@
 // Shared logic for the brand extraction flow (hero form and "Create guide" modal).
 
 import type { InputValidationResult } from "./input-utils"
+import { stampDraft } from "./pending-draft"
 
 export interface ExtractionResponse {
   success?: boolean
@@ -25,7 +26,7 @@ export type ExtractionResult =
   | { ok: false; error: ClassifiedError }
 
 /** localStorage keys describing the brand currently being set up. */
-const BRAND_KEYS = ["selectedTraits", "suggestedTraits", "brandKeywords"] as const
+const BRAND_KEYS = ["selectedTraits", "suggestedTraits", "brandKeywords", "previewContent"] as const
 
 function errorText(error: unknown): string {
   if (!error) return "Unknown error"
@@ -105,7 +106,8 @@ export function buildBrandDetails(data: ExtractionResponse): Record<string, unkn
 
 /**
  * Save a successful extraction to localStorage for the guide preview.
- * Always clears the previous brand's traits and keywords first (FE-8).
+ * Always clears the previous brand's traits, keywords and preview first (FE-8),
+ * and stamps the new draft so stale drafts are never claimed (FE-9).
  */
 export function persistExtraction(data: ExtractionResponse): Record<string, unknown> {
   const details = buildBrandDetails(data)
@@ -119,6 +121,7 @@ export function persistExtraction(data: ExtractionResponse): Record<string, unkn
       localStorage.setItem("selectedTraits", JSON.stringify(data.suggestedTraits.slice(0, 3)))
     }
     localStorage.setItem("brandDetails", JSON.stringify(details))
+    stampDraft()
   } catch {
     // storage unavailable (private mode, quota)
   }

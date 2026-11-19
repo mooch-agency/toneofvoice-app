@@ -22,6 +22,7 @@ const APP_STORAGE_KEYS = [
   "brandKeywords",
   "emailCapture",
   "savedGuideId",
+  "draftCreatedAt",
 ];
 
 /** Remove drafts so the next person on a shared browser doesn't inherit them (FE-9). */

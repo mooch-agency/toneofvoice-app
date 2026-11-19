@@ -10,6 +10,10 @@ const SERVER_ONLY = [
   "lib/pdf-chrome.ts",
   "lib/url-validation.ts",
   "lib/cheerio-site-scraper.ts",
+  "lib/openai.ts",
+  "lib/langsmith-openai.ts",
+  "lib/stripe.ts",
+  "lib/template-processor.ts",
 ]
 
 describe("server-only modules", () => {

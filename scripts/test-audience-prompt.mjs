@@ -105,51 +105,10 @@ async function generateAudienceSection({ openai, prompt }) {
   return text.trim()
 }
 
-async function evaluateStyleRules(content) {
-  const lines = content.split("\n")
-  let hasWhy = 0
-  let repeatedPatterns = 0
-  let descriptions = []
-
-  for (const line of lines) {
-    if (line.startsWith("### ") || line.startsWith("## ")) {
-      // Skip headers
-      continue
-    }
-    const desc = line.trim()
-    if (!desc || desc.match(/^(✅|❌|→|✗)/)) {
-      // Skip examples and lists
-      continue
-    }
-
-    descriptions.push(desc)
-
-    // Check for "why" (contains explanation)
-    if (desc.includes(" to ") || desc.includes(" — ") || desc.includes(" because ") || desc.includes(" so ")) {
-      hasWhy++
-    }
-
-    // Check for repetitive opening patterns
-    if (desc.match(/^(Use|Avoid|Keep|Choose|Write|Add|Include|Ensure|Stay|Be)/)) {
-      repeatedPatterns++
-    }
-  }
-
-  return {
-    totalDescriptions: descriptions.length,
-    withWhy: hasWhy,
-    withWhyPercent: descriptions.length ? Math.round(hasWhy / descriptions.length * 100) : 0,
-    repeatedOpeners: repeatedPatterns,
-    repeatedPercent: descriptions.length ? Math.round(repeatedPatterns / descriptions.length * 100) : 0,
-    sample: descriptions.slice(0, 3),
-  }
-}
-
 async function main() {
   const baseUrl = getArgValue("--baseUrl") || process.env.BASE_URL || "http://localhost:3000"
   const urls = getArgValues("--url")
   const descs = getArgValues("--desc")
-  const testRules = getArgValue("--test-rules") !== null
 
   const cases = []
 
@@ -194,56 +153,6 @@ async function main() {
 
     console.log("\n--- Prompt ---\n" + prompt)
     console.log("\n--- Output ---\n" + audienceSection)
-
-    if (testRules) {
-      console.log("\n--- Testing Style Rules ---")
-      try {
-        const rulesRes = await fetch(`${baseUrl}/api/generate-styleguide`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            brandDetails: {
-              name: extracted.brandName,
-              brandDetailsDescription: extracted.brandDetailsDescription,
-              audience: extracted.audience,
-              traits: ["Professional", "Clear"],
-              keywords: extracted.keywords || [],
-              productsServices: extracted.productsServices || [],
-              formalityLevel: "Professional",
-              readingLevel: "10-12",
-              englishVariant: "american",
-            },
-          }),
-        })
-
-        let rulesData
-        try {
-          rulesData = await rulesRes.json()
-        } catch {
-          throw new Error(`Rules API failed: invalid JSON (${rulesRes.status})`)
-        }
-
-        if (!rulesRes.ok || !rulesData?.success) {
-          const msg = rulesData?.message || rulesData?.error || `API failed (${rulesRes.status})`
-          throw new Error(msg)
-        }
-
-        // Extract and evaluate just the style rules section
-        const rulesMatch = rulesData.styleGuide?.match(/## Style Rules\s*\n([\s\S]*?)(?=##|$)/)
-        const rulesContent = rulesMatch ? rulesMatch[1] : rulesData.styleGuide
-
-        const evaluation = await evaluateStyleRules(rulesContent)
-        console.log(`\n✓ Generated ${evaluation.totalDescriptions} rules`)
-        console.log(`  ${evaluation.withWhy}/${evaluation.totalDescriptions} rules have "why" explanation (${evaluation.withWhyPercent}%)`)
-        console.log(`  Repetitive openers: ${evaluation.repeatedPercent}%`)
-        console.log(`\n  Sample descriptions:`)
-        evaluation.sample.forEach((desc, i) => {
-          console.log(`    ${i + 1}. ${truncate(desc, 85)}`)
-        })
-      } catch (err) {
-        console.log(`✗ Rules test failed: ${err?.message || err}`)
-      }
-    }
   }
 }
 

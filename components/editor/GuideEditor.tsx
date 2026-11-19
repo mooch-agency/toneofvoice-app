@@ -67,7 +67,7 @@ import {
 import { LinkElement } from "@/components/ui/link-node";
 
 // AI plugins
-import { AIKit } from "@/components/editor/plugins/ai-kit";
+import { AIKit, aiChatPlugin } from "@/components/editor/plugins/ai-kit";
 // Plate-style SuggestionLeaf with hover/active (no DiscussionKit)
 import { SuggestionAIKit } from "@/components/editor/plugins/suggestion-ai-kit";
 // Floating toolbar (appears on text selection)
@@ -186,7 +186,7 @@ export function GuideEditor({
   React.useEffect(() => {
     if (showAI) {
       try {
-        editor.setOption(AIChatPlugin, 'subscriptionTier' as any, subscriptionTier);
+        editor.setOption(aiChatPlugin, 'subscriptionTier', subscriptionTier);
       } catch {
         // AIChatPlugin not loaded
       }

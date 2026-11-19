@@ -211,7 +211,8 @@ function GuideContent() {
     )
   }
 
-  const showAI = !!user && isPaidTier(tier)
+  // Signed-in starters see Ask AI too; the AI menu shows them an upgrade dialog.
+  const showAI = !!user
   const saveLabel = isPreviewFlow ? undefined : SAVE_STATUS_LABEL[autosave.status]
   const headerContent = (
     <div className="flex items-center gap-3">

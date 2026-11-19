@@ -9,6 +9,13 @@ import {
 describe("persistExtraction", () => {
   beforeEach(() => localStorage.clear())
 
+  it("stamps a new draft and drops the previous brand's preview", () => {
+    localStorage.setItem("previewContent", "## Old brand")
+    persistExtraction({ success: true, brandName: "Globex" })
+    expect(Number(localStorage.getItem("draftCreatedAt"))).toBeGreaterThan(0)
+    expect(localStorage.getItem("previewContent")).toBeNull()
+  })
+
   it("clears the previous brand's traits and keywords when none are suggested (FE-8)", () => {
     localStorage.setItem("selectedTraits", JSON.stringify(["Bold", "Witty", "Warm"]))
     localStorage.setItem("suggestedTraits", JSON.stringify(["Bold"]))
