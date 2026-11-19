@@ -37,6 +37,7 @@ import {
 } from 'platejs/react';
 import { type PlateEditor, useEditorRef } from 'platejs/react';
 
+import { aiChatPlugin } from '@/components/editor/plugins/ai-kit';
 import { Button } from '@/components/ui/button';
 import {
   Command,
@@ -72,7 +73,7 @@ export function AIMenu() {
   const chat = usePluginOption(AIChatPlugin, 'chat');
   const { messages, status } = chat;
   const [anchorElement, setAnchorElement] = React.useState<HTMLElement | null>(null);
-  const subscriptionTier = usePluginOption(AIChatPlugin, 'subscriptionTier') || 'starter';
+  const subscriptionTier = usePluginOption(aiChatPlugin, 'subscriptionTier');
   const [showUpgradeDialog, setShowUpgradeDialog] = React.useState(false);
 
   // Insert mode: aiChat node is anchor. Edit mode: refresh anchor when suggestions are ready
@@ -198,24 +199,15 @@ export function AIMenu() {
                   api.aiChat.hide();
                 }
                 if (isHotkey('enter')(e) && !e.shiftKey) {
-                  console.log('🔍 [CUSTOM PROMPT] Enter pressed:', {
-                    hasInput: !!input.trim(),
-                    input: input.trim(),
-                    menuValue: value,
-                    tier: subscriptionTier,
-                  });
-
                   if (input.trim()) {
                     e.preventDefault();
                     e.stopPropagation();
 
                     if (subscriptionTier === 'starter') {
-                      console.log('❌ [CUSTOM PROMPT] Blocked - free tier');
                       setShowUpgradeDialog(true);
                       return;
                     }
 
-                    console.log('✅ [CUSTOM PROMPT] Submitting:', input);
                     void api.aiChat.submit(input, {
                       mode: 'chat',
                       prompt: isSelecting
@@ -480,7 +472,7 @@ export const AIMenuItems = ({
   const { messages } = usePluginOption(AIChatPlugin, 'chat');
   const aiEditor = usePluginOption(AIChatPlugin, 'aiEditor')!;
   const isSelecting = useIsSelecting();
-  const subscriptionTier = usePluginOption(AIChatPlugin, 'subscriptionTier') || 'starter';
+  const subscriptionTier = usePluginOption(aiChatPlugin, 'subscriptionTier');
 
   const menuState = React.useMemo(() => {
     if (messages && messages.length > 0) {
