@@ -270,3 +270,8 @@ it("acknowledges unhandled event types", async () => {
   expect((await POST(request())).status).toBe(200)
   expect(profileUpdates).toHaveLength(0)
 })
+
+it("returns 500 (so Stripe retries) when the Stripe key is missing", async () => {
+  delete process.env.STRIPE_SECRET_KEY
+  expect((await POST(request())).status).toBe(500)
+})

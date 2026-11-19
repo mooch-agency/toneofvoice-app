@@ -2,7 +2,7 @@ import { NextResponse } from "next/server"
 import type Stripe from "stripe"
 import { emailService } from "@/lib/email-service"
 import { getSupabaseAdmin } from "@/lib/supabase-admin"
-import { applySubscriptionToProfile, getStripe, getWebhookSecret } from "@/lib/stripe"
+import { StripeNotConfiguredError, applySubscriptionToProfile, getStripe, getWebhookSecret } from "@/lib/stripe"
 
 /**
  * Stripe webhook. Returns 400 only for bad signatures and 500 whenever an
@@ -16,15 +16,20 @@ export async function POST(request: Request) {
   }
 
   const secret = getWebhookSecret()
-  if (!secret) {
-    console.error("[webhook] Webhook secret not configured")
+  let stripe: Stripe
+  try {
+    if (!secret) throw new StripeNotConfiguredError()
+    stripe = getStripe()
+  } catch {
+    // 500 (not 400) so Stripe keeps retrying until the config is fixed.
+    console.error("[webhook] Stripe key or webhook secret not configured")
     return NextResponse.json({ error: "Webhook not configured" }, { status: 500 })
   }
 
   let event: Stripe.Event
   try {
     const payload = Buffer.from(await request.arrayBuffer())
-    event = getStripe().webhooks.constructEvent(payload, sig, secret)
+    event = stripe.webhooks.constructEvent(payload, sig, secret)
   } catch (err) {
     console.error("[webhook] Signature verification failed:", err instanceof Error ? err.message : err)
     return NextResponse.json({ error: "Invalid signature" }, { status: 400 })

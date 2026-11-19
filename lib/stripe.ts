@@ -3,7 +3,9 @@
  * writes a subscription onto a profile. Nothing here talks to Stripe or reads
  * required env at import time, so `next build` works without secrets.
  */
+import { NextResponse } from "next/server"
 import Stripe from "stripe"
+import { withRouteErrors } from "@/lib/api-auth"
 import { getSupabaseAdmin } from "@/lib/supabase-admin"
 import { effectiveTier, guideLimit, type Tier } from "@/lib/tiers"
 
@@ -173,6 +175,21 @@ export async function applySubscriptionToProfile(
   if (!data || data.length === 0) throw new Error(`No profile matched ${column}`)
 
   return { plan: priceIdToPlan(sub.items?.data?.[0]?.price?.id), update }
+}
+
+/** `withRouteErrors` plus a 503 when Stripe keys are missing. */
+export function withBillingErrors(name: string, handler: () => Promise<Response>): Promise<Response> {
+  return withRouteErrors(name, async () => {
+    try {
+      return await handler()
+    } catch (e) {
+      if (e instanceof StripeNotConfiguredError) {
+        console.error(`[${name}] Stripe is not configured`)
+        return NextResponse.json({ error: "Service unavailable" }, { status: 503 })
+      }
+      throw e
+    }
+  })
 }
 
 /** First subscription of a customer whose status is in `statuses` (newest first). */
