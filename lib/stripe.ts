@@ -153,10 +153,18 @@ export function profileUpdateFromSubscription(sub: Stripe.Subscription): Profile
 
 export type ProfileTarget = { userId: string } | { subscriptionId: string }
 
+/** No profile row matched the target (e.g. an orphaned subscription). */
+export class NoProfileMatchedError extends Error {
+  constructor(column: string) {
+    super(`No profile matched ${column}`)
+    this.name = "NoProfileMatchedError"
+  }
+}
+
 /**
  * Write a subscription's current state onto the matching profile with the
- * admin client. Throws on a database error or when no row matched, so the
- * webhook can return 500 and Stripe retries.
+ * admin client. Throws on a database error, and NoProfileMatchedError when no
+ * row matched, so callers decide whether a retry could help.
  */
 export async function applySubscriptionToProfile(
   target: ProfileTarget,
@@ -173,7 +181,7 @@ export async function applySubscriptionToProfile(
     .select("id")
 
   if (error) throw new Error(`Profile update failed: ${error.message ?? "unknown error"}`)
-  if (!data || data.length === 0) throw new Error(`No profile matched ${column}`)
+  if (!data || data.length === 0) throw new NoProfileMatchedError(column)
 
   return { plan: priceIdToPlan(sub.items?.data?.[0]?.price?.id), update }
 }

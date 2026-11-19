@@ -1,7 +1,13 @@
 import { NextResponse } from "next/server"
 import type Stripe from "stripe"
 import { getSupabaseAdmin } from "@/lib/supabase-admin"
-import { StripeNotConfiguredError, applySubscriptionToProfile, getStripe, getWebhookSecret } from "@/lib/stripe"
+import {
+  NoProfileMatchedError,
+  StripeNotConfiguredError,
+  applySubscriptionToProfile,
+  getStripe,
+  getWebhookSecret,
+} from "@/lib/stripe"
 
 /**
  * Stripe webhook. Returns 400 only for bad signatures and 500 whenever an
@@ -81,7 +87,14 @@ async function handleSubscriptionChange(event: Stripe.Event) {
   // rather than the (possibly stale) event payload. A deletion is final.
   const current =
     event.type === "customer.subscription.deleted" ? sub : await getStripe().subscriptions.retrieve(sub.id)
-  await applySubscriptionToProfile({ subscriptionId: sub.id }, current)
+  try {
+    await applySubscriptionToProfile({ subscriptionId: sub.id }, current)
+  } catch (err) {
+    // A subscription no profile owns (e.g. left over from an old double checkout)
+    // can never be applied; retrying for days would only get the endpoint disabled.
+    if (!(err instanceof NoProfileMatchedError)) throw err
+    console.warn("[webhook] Subscription not linked to any profile; ignored", { subscriptionId: sub.id, type: event.type })
+  }
 }
 
 /** Postgres "undefined table" / PostgREST "table not in schema cache". */

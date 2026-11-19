@@ -245,9 +245,25 @@ describe("customer.subscription.updated / deleted (SEC-7)", () => {
     expect(profileUpdates[0].payload).toMatchObject({ subscription_tier: "starter", subscription_status: "cancelled" })
   })
 
-  it("returns 500 when the subscription matches no profile yet (Stripe retries)", async () => {
-    useAdmin({ "profiles.update": () => ({ data: [] }) })
+  it.each(["customer.subscription.updated", "customer.subscription.deleted"])(
+    "acknowledges %s for a subscription no profile owns (orphans must not retry forever)",
+    async (type) => {
+      vi.spyOn(console, "warn").mockImplementation(() => {})
+      useAdmin({ "profiles.update": () => ({ data: [] }) })
+      h.stripe.webhooks.constructEvent.mockReturnValue(event(type, subscription({ status: "canceled" })))
+      expect((await POST(request())).status).toBe(200)
+    },
+  )
+
+  it("still returns 500 on a database error during a subscription change", async () => {
+    useAdmin({ "profiles.update": () => ({ error: { message: "db down" } }) })
     h.stripe.webhooks.constructEvent.mockReturnValue(event("customer.subscription.updated", subscription()))
+    expect((await POST(request())).status).toBe(500)
+  })
+
+  it("still returns 500 when a completed checkout matches no profile (retry can fix it)", async () => {
+    useAdmin({ "profiles.update": () => ({ data: [] }) })
+    h.stripe.webhooks.constructEvent.mockReturnValue(checkoutEvent("evt_noprofile"))
     expect((await POST(request())).status).toBe(500)
   })
 })

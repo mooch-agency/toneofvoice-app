@@ -19,6 +19,7 @@ vi.mock("@/lib/supabase-admin", () => ({ getSupabaseAdmin: () => h.admin }))
 import {
   STRIPE_API_VERSION,
   StripeNotConfiguredError,
+  NoProfileMatchedError,
   applySubscriptionToProfile,
   getStripe,
   planToPriceId,
@@ -205,7 +206,7 @@ describe("applySubscriptionToProfile", () => {
 
   it("throws when no row was updated", async () => {
     useAdmin(() => ({ data: [] }))
-    await expect(applySubscriptionToProfile({ userId: "u1" }, sub())).rejects.toThrow(/no profile/i)
+    await expect(applySubscriptionToProfile({ userId: "u1" }, sub())).rejects.toBeInstanceOf(NoProfileMatchedError)
   })
 
   it("throws when the database returns an error", async () => {
