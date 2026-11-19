@@ -20,13 +20,12 @@ import { Loader2 } from "lucide-react"
 interface GuideCardProps {
   id: string
   title: string
-  planType: string
   updatedAt: string
   /** Favicon URL when guide was generated from a website (e.g. Google favicon service). */
   faviconUrl?: string
 }
 
-export function GuideCard({ id, title, planType, updatedAt, faviconUrl }: GuideCardProps) {
+export function GuideCard({ id, title, updatedAt, faviconUrl }: GuideCardProps) {
   const [currentFaviconUrl, setCurrentFaviconUrl] = useState(faviconUrl)
   const [faviconFailed, setFaviconFailed] = useState(false)
   const showFavicon = currentFaviconUrl && !faviconFailed
@@ -73,14 +72,11 @@ export function GuideCard({ id, title, planType, updatedAt, faviconUrl }: GuideC
   const confirmDelete = async () => {
     setIsDeleting(true)
     try {
-      const response = await fetch(`/api/delete-style-guide?guideId=${id}`, {
+      const response = await fetch(`/api/delete-style-guide?guideId=${encodeURIComponent(id)}`, {
         method: "DELETE",
       })
 
-      if (!response.ok) {
-        const data = await response.json()
-        throw new Error(data.error || "Failed to delete guide")
-      }
+      if (!response.ok) throw new Error(`Delete failed (${response.status})`)
 
       toast({
         title: "Guide deleted",
@@ -93,7 +89,7 @@ export function GuideCard({ id, title, planType, updatedAt, faviconUrl }: GuideC
       console.error("Delete error:", error)
       toast({
         title: "Failed to delete guide",
-        description: error instanceof Error ? error.message : "An error occurred",
+        description: "Please try again in a moment.",
         variant: "destructive",
       })
     } finally {
@@ -106,7 +102,7 @@ export function GuideCard({ id, title, planType, updatedAt, faviconUrl }: GuideC
     <>
       <div className="group relative flex flex-col rounded-lg border bg-white p-4 transition-[border-color,box-shadow] hover:border-gray-300 hover:shadow-md dark:bg-gray-950 dark:hover:border-gray-700">
         <Link
-          href={`/guide?guideId=${id}`}
+          href={`/guide?guideId=${encodeURIComponent(id)}`}
           className="flex flex-col flex-1"
         >
           {/* Favicon when guide was generated from website; else sleek fallback icon */}

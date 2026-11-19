@@ -1,173 +1,88 @@
-// This is a mock email service for demonstration purposes
-// In a real application, you would use a service like SendGrid, Mailgun, etc.
+import { Resend } from "resend"
 
-import { Resend } from 'resend';
-
-let _resend: Resend | null = null;
-function getResend(): Resend {
-  if (_resend) return _resend;
-  const key = process.env.RESEND_API_KEY;
-  if (!key) throw new Error('RESEND_API_KEY not configured');
-  _resend = new Resend(key);
-  return _resend;
-}
-
-export type EmailTemplate = "purchase-confirmation" | "implementation-tips"
-
-export interface EmailOptions {
-  to: string
-  subject?: string
-  template: EmailTemplate
-  variables?: Record<string, any>
-}
-
-export interface ScheduledEmailOptions extends EmailOptions {
-  delay: string // e.g., '24h', '2d'
+let _resend: { key: string; client: Resend } | null = null
+function getResend(key: string): Resend {
+  if (_resend?.key !== key) _resend = { key, client: new Resend(key) }
+  return _resend.client
 }
 
 export interface EmailData {
-  to: string;
-  subject: string;
-  html?: string;
-  text?: string;
-  react?: React.ReactElement;
+  to: string
+  subject: string
+  html?: string
+  text?: string
 }
 
 export interface ThankYouEmailData {
-  customerEmail: string;
-  customerName?: string;
-  sessionId: string;
-  amount: number;
-  currency: string;
+  customerEmail: string
+  customerName?: string
 }
 
-export interface AbandonedCartEmailData {
-  customerEmail: string;
-  customerName?: string;
-  recoveryUrl: string;
-  discountCode?: string;
-  sessionId?: string;
+export type SendResult = { success: true; id?: string } | { success: false; error: string }
+
+const HTML_ESCAPES: Record<string, string> = {
+  "&": "&amp;",
+  "<": "&lt;",
+  ">": "&gt;",
+  '"': "&quot;",
+  "'": "&#39;",
 }
 
-/**
- * Send an email using the specified template and variables
- */
-export async function sendEmail(options: EmailOptions): Promise<boolean> {
-  console.log(`Sending email to ${options.to} using template ${options.template}`)
-  console.log("Variables:", options.variables)
-
-  // In a real implementation, this would call your email service API
-  return new Promise((resolve) => {
-    setTimeout(() => {
-      console.log(`Email sent to ${options.to}`)
-      resolve(true)
-    }, 500)
-  })
+export function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (c) => HTML_ESCAPES[c])
 }
 
-/**
- * Schedule an email to be sent after a delay
- */
-export async function scheduleEmail(options: ScheduledEmailOptions): Promise<boolean> {
-  console.log(`Scheduling email to ${options.to} with delay ${options.delay}`)
-
-  // In a real implementation, this would use a task queue or scheduling service
-  return new Promise((resolve) => {
-    setTimeout(() => {
-      console.log(`Email scheduled for ${options.to}`)
-      resolve(true)
-    }, 500)
-  })
+function firstName(name: string | undefined): string {
+  return name?.trim().split(/\s+/)[0] || "there"
 }
 
-/**
- * Generate a secure access token for email links
- */
-export function generateSecureToken(): string {
-  // In a real implementation, this would generate a cryptographically secure token
-  return Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15)
-}
-
-/**
- * Send a purchase confirmation email with access links
- */
-export async function sendPurchaseConfirmationEmail(email: string, accessToken: string): Promise<boolean> {
-  return sendEmail({
-    to: email,
-    subject: "Your Tone of Voice Guide is Ready!",
-    template: "purchase-confirmation",
-    variables: {
-      accessLink: `https://toneofvoice.app/guide?token=${accessToken}`,
-      downloadLinks: {
-        pdf: `https://toneofvoice.app/download/pdf?token=${accessToken}`,
-        markdown: `https://toneofvoice.app/download/md?token=${accessToken}`,
-        docx: `https://toneofvoice.app/download/docx?token=${accessToken}`,
-        html: `https://toneofvoice.app/download/html?token=${accessToken}`,
-      },
-    },
-  })
+function appUrl(): string {
+  return (process.env.NEXT_PUBLIC_APP_URL || "https://toneofvoice.app").replace(/\/+$/, "")
 }
 
 class EmailService {
-  async sendEmail(data: EmailData) {
+  /** Sends via Resend. Never throws and never logs the recipient. */
+  async sendEmail(data: EmailData): Promise<SendResult> {
+    const key = process.env.RESEND_API_KEY
+    if (!key) {
+      console.log("[email] RESEND_API_KEY not set; email not sent:", data.subject)
+      return { success: false, error: "No API key configured" }
+    }
     try {
-      if (!process.env.RESEND_API_KEY) {
-        console.log('⚠️ RESEND_API_KEY not set - email not sent:', data.subject);
-        return { success: false, error: 'No API key configured' };
-      }
-
-      // Use onboarding@resend.dev for testing until toneofvoice.app is verified
-      const fromAddress = process.env.NODE_ENV === 'production'
-        ? 'Tahi from Tone of Voice App <support@toneofvoice.app>'
-        : 'Tahi from Tone of Voice App <onboarding@resend.dev>';
-
-      const result = await getResend().emails.send({
-        from: fromAddress,
+      // onboarding@resend.dev works without a verified domain (local/dev).
+      const from =
+        process.env.NODE_ENV === "production"
+          ? "Tahi from Tone of Voice App <support@toneofvoice.app>"
+          : "Tahi from Tone of Voice App <onboarding@resend.dev>"
+      const result = await getResend(key).emails.send({
+        from,
         to: data.to,
         subject: data.subject,
         html: data.html,
-        text: data.text,
-        react: data.react,
-      });
-
-      console.log('✅ Email sent successfully:', result.data?.id);
-      return { success: true, id: result.data?.id };
+        text: data.text ?? "",
+      })
+      console.log("[email] Sent:", result.data?.id)
+      return { success: true, id: result.data?.id }
     } catch (error) {
-      console.error('❌ Failed to send email:', error);
-      return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+      console.error("[email] Send failed:", error instanceof Error ? error.message : error)
+      return { success: false, error: "Send failed" }
     }
   }
 
-  async sendThankYouEmail(data: ThankYouEmailData) {
-    const subject = 'Thanks for your purchase!';
-    const html = this.generateThankYouEmailHTML(data);
-    const text = this.generateThankYouEmailText(data);
-
+  async sendThankYouEmail(data: ThankYouEmailData): Promise<SendResult> {
     return this.sendEmail({
       to: data.customerEmail,
-      subject,
-      html,
-      text,
-    });
+      subject: "Thanks for your purchase!",
+      html: thankYouHtml(data),
+      text: thankYouText(data),
+    })
   }
+}
 
-  async sendAbandonedCartEmail(data: AbandonedCartEmailData) {
-    const subject = 'Complete Your Tone of Voice Guide - 20% Off';
-    const html = this.generateAbandonedCartEmailHTML(data);
-    const text = this.generateAbandonedCartEmailText(data);
-
-    return this.sendEmail({
-      to: data.customerEmail,
-      subject,
-      html,
-      text,
-    });
-  }
-
-  private generateThankYouEmailHTML(data: ThankYouEmailData): string {
-    const firstName = data.customerName ? data.customerName.split(' ')[0] : 'there';
-    
-    return `
+function thankYouHtml(data: ThankYouEmailData): string {
+  const name = escapeHtml(firstName(data.customerName))
+  const dashboardUrl = escapeHtml(`${appUrl()}/dashboard`)
+  return `
       <!DOCTYPE html>
       <html>
         <head>
@@ -176,13 +91,9 @@ class EmailService {
           <title>Thank you for using Tone of Voice App!</title>
         </head>
         <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
-          
-          <p style="margin-bottom: 20px;">Hey ${firstName},</p>
-
+          <p style="margin-bottom: 20px;">Hey ${name},</p>
           <p style="margin-bottom: 15px;">I'm Tahi. I built Tone of Voice App because I kept wasting hours piecing together brand voice docs for clients.</p>
-
           <p style="margin-bottom: 15px;">Seeing your order come through today honestly made my week. 🙌</p>
-          
           <div style="background: #f8fafc; padding: 20px; border-radius: 8px; margin: 25px 0;">
             <p style="margin: 0 0 15px 0; font-weight: 500;">If you have 2 minutes:</p>
             <ol style="margin: 0; padding-left: 20px;">
@@ -191,39 +102,31 @@ class EmailService {
               <li style="margin-bottom: 0;">Anything else you wanna share :)</li>
             </ol>
           </div>
-          
           <p style="margin-bottom: 15px;">And if you've got questions about Tone of Voice App, here's my direct Calendly link (15 min, no pitch):</p>
-          
           <div style="text-align: center; margin: 25px 0;">
-            <a href="https://calendly.com/l-gichigi/customer-chat" 
+            <a href="https://calendly.com/l-gichigi/customer-chat"
                style="background: #2563eb; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; display: inline-block; font-weight: 500;">
               📅 Chat with Tahi (15 min)
             </a>
           </div>
-          
           <div style="text-align: center; margin: 25px 0;">
-            <a href="${process.env.NEXT_PUBLIC_APP_URL}/guide?session_id=${data.sessionId}" 
+            <a href="${dashboardUrl}"
                style="background: #16a34a; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; display: inline-block; font-weight: 500;">
-              Access Your Tone of Voice Guide
+              Open your guides
             </a>
           </div>
-          
           <p style="margin-bottom: 15px;">Thanks again for being one of our very first customers. Anything you need, just hit reply — it's really me on the other end.</p>
-          
           <p style="margin-bottom: 5px;">Cheers,<br>
           Tahi<br>
           Founder, Tone of Voice App<br>
           <a href="https://x.com/tahigichigi" style="color: #2563eb;">x.com/tahigichigi</a></p>
-          
         </body>
       </html>
-    `;
-  }
+    `
+}
 
-  private generateThankYouEmailText(data: ThankYouEmailData): string {
-    const firstName = data.customerName ? data.customerName.split(' ')[0] : 'there';
-    
-    return `Hey ${firstName},
+function thankYouText(data: ThankYouEmailData): string {
+  return `Hey ${firstName(data.customerName)},
 
 I'm Tahi. I built Tone of Voice App because I kept wasting hours piecing together brand voice docs for clients.
 
@@ -236,76 +139,14 @@ If you have 2 minutes:
 
 And if you've got questions about Tone of Voice App, here's my direct Calendly link (15 min, no pitch): https://calendly.com/l-gichigi/customer-chat
 
-Access your tone of voice guide: ${process.env.NEXT_PUBLIC_APP_URL}/guide?session_id=${data.sessionId}
+Open your guides: ${appUrl()}/dashboard
 
 Thanks again for being one of our very first customers. Anything you need, just hit reply — it's really me on the other end.
 
 Cheers,
 Tahi
 Founder, Tone of Voice App
-x.com/tahigichigi`;
-  }
-
-  private generateAbandonedCartEmailHTML(data: AbandonedCartEmailData): string {
-    return `
-      <!DOCTYPE html>
-      <html>
-        <head>
-          <meta charset="utf-8">
-          <meta name="viewport" content="width=device-width, initial-scale=1.0">
-          <title>Complete Your Tone of Voice Guide</title>
-        </head>
-        <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 40px 20px;">
-
-          <div style="margin-bottom: 40px;">
-            <p style="font-size: 18px; margin-bottom: 30px;">Hey there,</p>
-
-            <p style="font-size: 16px; margin-bottom: 30px;">I noticed you started creating your tone of voice guide but didn't finish. Totally get it - big decisions take time.</p>
-            
-            <p style="font-size: 16px; margin-bottom: 8px;">Here's 20% off when you're ready:</p>
-            ${data.discountCode ? `<p style="font-size: 18px; font-weight: bold; margin-bottom: 30px;">${data.discountCode}</p>` : ''}
-            
-            <p style="font-size: 16px; margin-bottom: 30px;">Just add the code at checkout.</p>
-            
-            <p style="font-size: 16px; margin-bottom: 40px;">No pressure, just wanted to make sure you had it.</p>
-            
-            <div style="text-align: center; margin: 40px 0;">
-              <a href="${data.recoveryUrl}"
-                 style="background: #333; color: white; padding: 16px 32px; text-decoration: none; border-radius: 8px; display: inline-block; font-weight: 600; font-size: 16px;">
-                Generate Your Tone of Voice Guide
-              </a>
-            </div>
-          </div>
-
-          <div style="border-top: 1px solid #ddd; padding-top: 30px; margin-top: 40px;">
-            <p style="font-size: 16px; margin-bottom: 8px;">Tahi</p>
-            <p style="color: #666; font-size: 14px; margin-bottom: 8px;">Founder, Tone of Voice App</p>
-            <p style="color: #666; font-size: 14px;">x.com/tahigichigi</p>
-          </div>
-        </body>
-      </html>
-    `;
-  }
-
-  private generateAbandonedCartEmailText(data: AbandonedCartEmailData): string {
-    return `
-Hey how's it going?
-
-I noticed you started generating your tone of voice guide but didn't finish. I know how busy things get.
-
-Here's 20% off when you're ready: ${data.discountCode || 'COMEBACK20'}
-
-Just add the code at checkout.
-
-No pressure, just wanted to make sure you had it.
-
-Generate Your Tone of Voice Guide: ${data.recoveryUrl}
-
-Tahi
-Founder, Tone of Voice App
-
-    `;
-  }
+x.com/tahigichigi`
 }
 
-export const emailService = new EmailService();
+export const emailService = new EmailService()

@@ -36,11 +36,12 @@ export async function GET(req: Request): Promise<Response> {
     const admin = getSupabaseAdmin();
     const { error } = await admin.auth.admin.listUsers({ page: 1, perPage: 1 });
     if (error) {
-      return NextResponse.json({ ok: false, error: error.message }, { status: 502 });
+      console.error("[keep-alive] Ping failed:", error);
+      return NextResponse.json({ ok: false, error: "Database ping failed" }, { status: 502 });
     }
     return NextResponse.json({ ok: true, ts: new Date().toISOString() });
   } catch (err) {
-    const message = err instanceof Error ? err.message : "unknown error";
-    return NextResponse.json({ ok: false, error: message }, { status: 500 });
+    console.error("[keep-alive] Error:", err);
+    return NextResponse.json({ ok: false, error: "Keep-alive failed" }, { status: 500 });
   }
 }
