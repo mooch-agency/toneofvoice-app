@@ -1,5 +1,3 @@
-import { OpenAI } from "openai"
-import Logger from "./logger"
 
 // Enhanced Error Handling for Tone of Voice App API calls
 // Phase 1: Error mapping and user-friendly messages
@@ -220,55 +218,52 @@ const DEFAULT_RETRY_CONFIG: RetryConfig = {
   backoffMultiplier: 2 // Double delay each retry
 }
 
-// Enhanced fetch with retry logic
+const RETRYABLE_STATUSES = new Set([408, 429, 502, 503, 504])
+const REQUEST_TIMEOUT_MS = 300000 // 5 minutes: style guide generation is slow
+
+const sleep = (ms: number, signal?: AbortSignal | null) =>
+  new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) return reject(new DOMException("Aborted", "AbortError"))
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort)
+      resolve()
+    }, ms)
+    const onAbort = () => {
+      clearTimeout(timer)
+      reject(new DOMException("Aborted", "AbortError"))
+    }
+    signal?.addEventListener("abort", onAbort, { once: true })
+  })
+
+// Fetch with retry: only network errors and 408/429/502/503/504 are retried, with
+// exponential backoff. Other statuses fail immediately. The caller's AbortSignal is honoured.
 export async function fetchWithRetry(
   url: string,
   options: RequestInit,
   retryConfig: Partial<RetryConfig> = {}
 ): Promise<Response> {
   const config = { ...DEFAULT_RETRY_CONFIG, ...retryConfig }
-  let lastError: any
-  
-  for (let attempt = 1; attempt <= config.maxAttempts; attempt++) {
+  const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+  const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout
+
+  for (let attempt = 1; ; attempt++) {
+    let failure: Error
+    let retryable: boolean
     try {
-      const response = await fetch(url, {
-        ...options,
-        // Add timeout to prevent hanging requests
-        signal: AbortSignal.timeout(300000) // 5 minute timeout for style guide generation
+      const response = await fetch(url, { ...options, signal })
+      if (response.ok) return response
+      failure = Object.assign(new Error(`HTTP ${response.status}: ${response.statusText}`), {
+        status: response.status,
       })
-      
-      // If response is ok, return it
-      if (response.ok) {
-        return response
-      }
-      
-      // For client errors (4xx), don't retry
-      if (response.status >= 400 && response.status < 500) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`)
-      }
-      
-      // For server errors (5xx), retry
-      if (attempt === config.maxAttempts) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`)
-      }
-      
+      retryable = RETRYABLE_STATUSES.has(response.status)
     } catch (error) {
-      lastError = error
-      
-      // Don't retry on client errors or non-retryable errors
-      const errorDetails = createErrorDetails(error)
-      if (!errorDetails.canRetry || attempt === config.maxAttempts) {
-        throw error
-      }
-      
-      // Wait before retrying with exponential backoff
-      const delay = config.delayMs * Math.pow(config.backoffMultiplier, attempt - 1)
-      console.log(`Attempt ${attempt} failed, retrying in ${delay}ms...`)
-      await new Promise(resolve => setTimeout(resolve, delay))
+      if (signal.aborted) throw error
+      failure = error instanceof Error ? error : new Error(String(error))
+      retryable = error instanceof TypeError // network failure
     }
+    if (!retryable || attempt >= config.maxAttempts) throw failure
+    await sleep(config.delayMs * Math.pow(config.backoffMultiplier, attempt - 1), options.signal)
   }
-  
-  throw lastError
 }
 
 // Simplified API call wrapper

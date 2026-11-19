@@ -1,144 +1,129 @@
-import { createClient, MissingSupabaseConfigError } from "@/lib/supabase-server";
-import { NextResponse } from "next/server";
+import { NextResponse } from "next/server"
+import { requireUser, withRouteErrors } from "@/lib/api-auth"
+import { canCreateGuide, guideLimit } from "@/lib/tiers"
 
-/** Save a style guide for the authenticated user. */
+const MAX_CONTENT_BYTES = 200 * 1024
+const MAX_BRAND_DETAILS_BYTES = 50 * 1024
+const MAX_TEXT = 255
+
+/** Raised by the style_guides BEFORE INSERT trigger (migration 002). */
+const LIMIT_TRIGGER_MESSAGE = "guide_limit_reached"
+
+interface SaveInput {
+  guide_id?: string
+  title: string
+  brand_name: string | null
+  content_md: string
+  brand_details: Record<string, unknown> | null
+}
+
+type Parsed = { ok: true; input: SaveInput } | { ok: false; status: 400 | 413; error: string }
+
+const byteLength = (s: string) => new TextEncoder().encode(s).length
+const isPlainObject = (v: unknown): v is Record<string, unknown> =>
+  typeof v === "object" && v !== null && !Array.isArray(v)
+
+function parse(body: unknown): Parsed {
+  if (!isPlainObject(body)) return { ok: false, status: 400, error: "Invalid request body" }
+  const { guide_id, title, brand_name, content_md, brand_details } = body
+
+  if (typeof title !== "string" || !title.trim() || typeof content_md !== "string" || !content_md) {
+    return { ok: false, status: 400, error: "Missing required fields: title, content_md" }
+  }
+  if (guide_id !== undefined && guide_id !== null && (typeof guide_id !== "string" || !guide_id)) {
+    return { ok: false, status: 400, error: "Invalid guide_id" }
+  }
+  if (brand_name !== undefined && brand_name !== null && typeof brand_name !== "string") {
+    return { ok: false, status: 400, error: "Invalid brand_name" }
+  }
+  if (brand_details !== undefined && brand_details !== null && !isPlainObject(brand_details)) {
+    return { ok: false, status: 400, error: "Invalid brand_details" }
+  }
+  if (byteLength(content_md) > MAX_CONTENT_BYTES) {
+    return { ok: false, status: 413, error: "Guide is too large to save" }
+  }
+  if (brand_details && byteLength(JSON.stringify(brand_details)) > MAX_BRAND_DETAILS_BYTES) {
+    return { ok: false, status: 413, error: "Brand details are too large to save" }
+  }
+
+  return {
+    ok: true,
+    input: {
+      guide_id: (guide_id as string | null | undefined) ?? undefined,
+      title,
+      brand_name: (brand_name as string | null | undefined) ?? null,
+      content_md,
+      brand_details: (brand_details as Record<string, unknown> | null | undefined) ?? null,
+    },
+  }
+}
+
+/** The one row shape written for both insert and update. */
+function toRow(input: SaveInput) {
+  return {
+    title: input.title.slice(0, MAX_TEXT),
+    brand_name: input.brand_name?.slice(0, MAX_TEXT) ?? null,
+    content_md: input.content_md,
+    plan_type: "style_guide" as const,
+    brand_details: input.brand_details,
+  }
+}
+
+const limitReached = (limit: number, used: number) =>
+  NextResponse.json(
+    { error: "Guide limit reached. Upgrade to add more guides.", code: "GUIDE_LIMIT", limit, used },
+    { status: 403 },
+  )
+
+const saveFailed = () => NextResponse.json({ error: "Failed to save guide" }, { status: 500 })
+
+/** Save (create or update) a style guide for the signed-in user. Never overwrites another guide. */
 export async function POST(req: Request) {
-  try {
-    const supabase = await createClient();
-    const { data, error: authError } = await supabase.auth.getUser();
-    const user = data?.user;
+  return withRouteErrors("save-style-guide", async () => {
+    const auth = await requireUser({ withTier: true })
+    if (!auth.ok) return auth.response
+    const { supabase, user, tier } = auth
 
-    if (authError || !user) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
+    const body = await req.json().catch(() => undefined)
+    const parsed = parse(body)
+    if (!parsed.ok) return NextResponse.json({ error: parsed.error }, { status: parsed.status })
+    const { input } = parsed
 
-    const body = await req.json();
-    const { guide_id, title, brand_name, content_md, plan_type, brand_details } =
-      body as {
-        guide_id?: string;
-        title?: string;
-        brand_name?: string;
-        content_md?: string;
-        plan_type?: "style_guide";
-        brand_details?: object;
-      };
-
-    if (!title || !content_md) {
-      return NextResponse.json(
-        { error: "Missing required fields: title, content_md" },
-        { status: 400 }
-      );
-    }
-
-    if (guide_id) {
-      // Update existing guide (user must own it)
+    if (input.guide_id) {
       const { data: guide, error } = await supabase
         .from("style_guides")
-        .update({
-          title: title.slice(0, 255),
-          brand_name: brand_name?.slice(0, 255) ?? null,
-          content_md,
-          plan_type: "style_guide",
-          brand_details: brand_details ?? null,
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", guide_id)
+        .update({ ...toRow(input), updated_at: new Date().toISOString() })
+        .eq("id", input.guide_id)
         .eq("user_id", user.id)
         .select("id, title, updated_at")
-        .single();
-
+        .maybeSingle()
       if (error) {
-        console.error("[save-style-guide] Update error:", error);
-        return NextResponse.json(
-          { error: error.message || "Failed to update guide" },
-          { status: 500 }
-        );
+        console.error("[save-style-guide] Update error:", error)
+        return saveFailed()
       }
-      if (!guide) {
-        return NextResponse.json(
-          { error: "Guide not found or access denied" },
-          { status: 404 }
-        );
-      }
-      return NextResponse.json({ success: true, guide });
+      if (!guide) return NextResponse.json({ error: "Guide not found or access denied" }, { status: 404 })
+      return NextResponse.json({ success: true, guide })
     }
 
-    // Create new guide
-    const { data: profile } = await supabase
-      .from("profiles")
-      .select("subscription_tier, guides_limit")
-      .eq("id", user.id)
-      .single();
-
-    const tier = (profile?.subscription_tier === "free" ? "starter" : profile?.subscription_tier) ?? "starter";
-    const limit = tier === "starter" ? 1 : tier === "pro" ? 2 : 99;
-
-    const { count, data: existingGuides } = await supabase
+    const { count } = await supabase
       .from("style_guides")
-      .select("id", { count: "exact" })
+      .select("id", { count: "exact", head: true })
       .eq("user_id", user.id)
-      .order("updated_at", { ascending: false })
-      .limit(1);
-
-    if ((count ?? 0) >= limit) {
-      // At limit: allow update of most recent guide (for "save preview" flow)
-      const mostRecent = existingGuides?.[0];
-      if (mostRecent?.id) {
-        const { data: guide, error } = await supabase
-          .from("style_guides")
-          .update({
-            title: title.slice(0, 255),
-            brand_name: brand_name?.slice(0, 255) ?? null,
-            content_md,
-            plan_type: "style_guide",
-            brand_details: brand_details ?? null,
-            updated_at: new Date().toISOString(),
-          })
-          .eq("id", mostRecent.id)
-          .eq("user_id", user.id)
-          .select("id, title, updated_at")
-          .single();
-
-        if (!error && guide) {
-          return NextResponse.json({ success: true, guide });
-        }
-      }
-      return NextResponse.json(
-        { error: "Guide limit reached. Upgrade to add more guides." },
-        { status: 403 }
-      );
-    }
+    const used = count ?? 0
+    const limit = guideLimit(tier)
+    if (!canCreateGuide(tier, used)) return limitReached(limit, used)
 
     const { data: guide, error } = await supabase
       .from("style_guides")
-      .insert({
-        user_id: user.id,
-        title: title.slice(0, 255),
-        brand_name: brand_name?.slice(0, 255) ?? null,
-        content_md,
-        plan_type: "style_guide",
-        brand_details: brand_details ?? null,
-      })
+      .insert({ user_id: user.id, ...toRow(input) })
       .select("id, title, created_at")
-      .single();
-
+      .single()
     if (error) {
-      console.error("[save-style-guide] Insert error:", error);
-      return NextResponse.json(
-        { error: error.message || "Failed to save guide" },
-        { status: 500 }
-      );
+      // The DB trigger closes the count-then-insert race.
+      if (String(error.message ?? "").includes(LIMIT_TRIGGER_MESSAGE)) return limitReached(limit, limit)
+      console.error("[save-style-guide] Insert error:", error)
+      return saveFailed()
     }
-
-    return NextResponse.json({ success: true, guide });
-  } catch (e) {
-    if (e instanceof MissingSupabaseConfigError) {
-      return NextResponse.json({ error: "Service unavailable" }, { status: 503 });
-    }
-    console.error("[save-style-guide] Error:", e);
-    return NextResponse.json(
-      { error: "Failed to save guide" },
-      { status: 500 }
-    );
-  }
+    return NextResponse.json({ success: true, guide })
+  })
 }

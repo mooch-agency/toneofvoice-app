@@ -4,7 +4,14 @@ import tsconfigPaths from "vite-tsconfig-paths"
 
 export default defineConfig({
   plugins: [tsconfigPaths(), react()],
+  resolve: {
+    // "server-only" throws outside a React Server environment; tests import server modules directly.
+    alias: { "server-only": "next/dist/compiled/server-only/empty.js" },
+  },
   test: {
     environment: "jsdom",
+    setupFiles: ["./test/setup.ts"],
+    include: ["**/*.test.{ts,tsx}"],
+    exclude: ["**/node_modules/**", ".next/**", ".claude/**"],
   },
 })

@@ -1,6 +1,3 @@
-"use client"
-
-import dynamic from "next/dynamic"
 import Header from "@/components/Header"
 import BrandBanner from "@/components/BrandBanner"
 import HeroSection from "@/components/landing/hero-section"
@@ -11,18 +8,10 @@ import HowItWorksSection from "@/components/landing/how-it-works-section"
 import ExampleSection from "@/components/landing/example-section"
 import PricingSection from "@/components/landing/pricing-section"
 import FaqSection from "@/components/landing/faq-section"
+import TestimonialsSection from "@/components/testimonials-section"
 import FinalCtaSection from "@/components/landing/final-cta-section"
 
-// Lazy load non-critical sections (moved outside component to prevent re-creation on re-renders)
-const TestimonialsSection = dynamic(
-  () => import("../components/testimonials-section"),
-  {
-    ssr: false,
-    loading: () => (
-      <div className="w-full py-12 md:py-20 lg:py-24 bg-muted"></div>
-    ),
-  }
-)
+export const metadata = { alternates: { canonical: "/" } }
 
 export default function LandingPage() {
   return (
@@ -35,9 +24,7 @@ export default function LandingPage() {
         <WhatsIncludedSection />
         <ComparisonSection />
         <HowItWorksSection />
-        <div key="testimonials-stable">
-          <TestimonialsSection />
-        </div>
+        <TestimonialsSection />
         <ExampleSection />
         <PricingSection />
         <FaqSection />

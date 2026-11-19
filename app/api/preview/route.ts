@@ -1,102 +1,84 @@
 import { NextResponse } from "next/server"
-import { renderPreviewStyleGuide, renderStyleGuideTemplate } from "@/lib/template-processor"
+import type { User } from "@supabase/supabase-js"
+import { tooManyRequests, withRouteErrors } from "@/lib/api-auth"
+import { parsePreviewRequest, readJsonBody } from "@/lib/brand-input"
+import Logger from "@/lib/logger"
+import { clientKey } from "@/lib/rate-limit"
+import { checkRateLimit } from "@/lib/rate-limit-durable"
 import { createClient } from "@/lib/supabase-server"
+import { renderStyleGuideTemplate } from "@/lib/template-processor"
+import { effectiveTier, isPaidTier, type Tier } from "@/lib/tiers"
+import type { TraitName } from "@/lib/traits"
 
-// Simplified validation function
-function validateBrandDetails(details: any) {
-  const errors: string[] = []
-  
-  // Required fields
-  if (!details.name || details.name.trim().length === 0) {
-    errors.push("Brand name is required")
+export const maxDuration = 120
+/** Stop generating a little before the platform kills the function. */
+const DEADLINE_MS = (maxDuration - 10) * 1000
+
+const MAX_BODY_BYTES = 100_000
+const RATE_LIMIT = { limit: 10, windowMs: 10 * 60_000 }
+
+/** Used when the visitor has no traits selected (for example trait suggestion failed). */
+const DEFAULT_TRAITS: TraitName[] = ["Warm", "Direct", "Supportive"]
+
+/** Sections a preview cannot do without. Paid sections that fail stay locked and can be expanded later. */
+const REQUIRED_SECTIONS = new Set(["brand-voice", "audience"])
+
+/** The signed-in user and effective tier, or an anonymous starter. Never throws. */
+async function optionalUser(): Promise<{ user: User | null; tier: Tier }> {
+  try {
+    const supabase = await createClient()
+    const { data } = await supabase.auth.getUser()
+    const user = data?.user ?? null
+    if (!user) return { user: null, tier: "starter" }
+    const { data: profile } = await supabase
+      .from("profiles")
+      .select("subscription_tier, subscription_status")
+      .eq("id", user.id)
+      .single()
+    return { user, tier: effectiveTier(profile) }
+  } catch (error) {
+    Logger.warn("Preview: could not load user, continuing as anonymous", undefined, error)
+    return { user: null, tier: "starter" }
   }
-  
-  if (!details.brandDetailsDescription || details.brandDetailsDescription.trim().length === 0) {
-    errors.push("Brand description is required")
-  }
-  
-  return errors
 }
 
-export async function POST(request: Request) {
-  try {
-    console.log('[Preview API] Request received')
-    
-    const { brandDetails, selectedTraits } = await request.json()
-    
-    if (!brandDetails) {
-      console.error('[Preview API] No brand details provided')
-      return NextResponse.json(
-        { error: 'Brand details are required' },
-        { status: 400 }
-      )
-    }
-    
-    console.log('[Preview API] Validating brand details...')
-    const validationErrors = validateBrandDetails(brandDetails)
-    if (validationErrors.length > 0) {
-      console.error('[Preview API] Validation errors:', validationErrors)
-      return NextResponse.json(
-        { error: 'Invalid brand details', details: validationErrors },
-        { status: 400 }
-      )
-    }
-    
-    console.log('[Preview API] Generating content with AI...')
-    const startTime = Date.now()
+/**
+ * Generate a new guide. Starter (or anonymous): preview with locked paid
+ * sections. Active Pro/Agency: full guide.
+ *
+ * Body: { brandDetails, selectedTraits? }
+ * Responses:
+ * - 200 { success: true, preview, failedSections } (failed paid sections stay locked)
+ * - 400 { error } invalid input; 413 body too large; 429 rate limited
+ * - 502 { error, failedSections } Brand Voice or Audience failed
+ */
+export async function POST(req: Request) {
+  return withRouteErrors("preview", async () => {
+    const parsed = await readJsonBody(req, MAX_BODY_BYTES)
+    if (!parsed.ok) return NextResponse.json({ error: parsed.error }, { status: parsed.status })
+    const input = parsePreviewRequest(parsed.body)
+    if (!input.ok) return NextResponse.json({ error: input.error }, { status: 400 })
 
-    // Include selectedTraits in brandDetails for processing
-    const enhancedBrandDetails = {
-      ...brandDetails,
-      traits: selectedTraits || brandDetails.traits || []
-    }
+    const { user, tier } = await optionalUser()
+    const limited = await checkRateLimit(`preview:${clientKey(req, user?.id)}`, RATE_LIMIT)
+    if (!limited.ok) return tooManyRequests(limited.retryAfterSeconds)
 
-    // Check user's subscription tier to determine what to generate
-    let subscriptionTier = 'starter'
-    try {
-      const supabase = await createClient()
-      const { data: { user } } = await supabase.auth.getUser()
-
-      if (user) {
-        const { data: tierData } = await supabase
-          .from('profiles')
-          .select('subscription_tier')
-          .eq('id', user.id)
-          .single()
-
-        if (tierData?.subscription_tier && tierData.subscription_tier !== 'free') {
-          subscriptionTier = tierData.subscription_tier
-        }
-      }
-    } catch (error) {
-      console.warn('[Preview API] Could not fetch subscription tier, defaulting to starter:', error)
-    }
-
-    console.log(`[Preview API] User tier: ${subscriptionTier}`)
-
-    // Generate full content for paid users, preview for free users
-    const preview = subscriptionTier === 'starter'
-      ? await renderPreviewStyleGuide({ brandDetails: enhancedBrandDetails })
-      : await renderStyleGuideTemplate({ brandDetails: enhancedBrandDetails, useAIContent: true, isPreview: false })
-
-    const duration = Date.now() - startTime
-    console.log(`[Preview API] Content generated successfully in ${duration}ms (tier: ${subscriptionTier})`)
-    
-    return NextResponse.json({
-      success: true,
-      preview,
-      duration: `${duration}ms`
+    const brandDetails = { ...input.data, traits: input.data.traits.length ? input.data.traits : DEFAULT_TRAITS }
+    const { markdown, failedSections } = await renderStyleGuideTemplate({
+      brandDetails,
+      isPreview: !isPaidTier(tier),
+      userEmail: user?.email,
+      signal: AbortSignal.timeout(DEADLINE_MS),
     })
-    
-  } catch (error) {
-    console.error('[Preview API] Error generating preview:', error)
-    
-    return NextResponse.json(
-      { 
-        error: 'Failed to generate preview',
-        details: error instanceof Error ? error.message : String(error)
-      },
-      { status: 500 }
-    )
-  }
-} 
+
+    if (failedSections.some((id) => REQUIRED_SECTIONS.has(id))) {
+      Logger.warn("Preview generation failed", { failedSections })
+      return NextResponse.json(
+        { error: "We couldn't generate your guide. Please try again.", failedSections },
+        { status: 502 },
+      )
+    }
+
+    return NextResponse.json({ success: true, preview: markdown, failedSections })
+  })
+}

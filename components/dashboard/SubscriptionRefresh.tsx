@@ -1,42 +1,57 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useRef } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
 import { useToast } from "@/hooks/use-toast"
 import { MetaPixel } from "@/lib/meta-pixel"
+import { readPendingDraft, savePendingDraft } from "@/lib/pending-draft"
+import { clearAutoSaveBlocks } from "@/components/dashboard/AutoSaveGuide"
+
+/** Save a guide previewed before checkout now that the new plan has room for it. */
+async function savePendingDraftAfterUpgrade() {
+  const draft = readPendingDraft()
+  if (!draft) return
+  try {
+    const { status, guideId } = await savePendingDraft(draft)
+    if (!guideId) console.warn(`[SubscriptionRefresh] Pending guide not saved (${status})`)
+  } catch (error) {
+    console.error("[SubscriptionRefresh] Pending guide save failed:", error)
+  }
+}
 
 /**
- * Verifies subscription status after checkout redirect.
- * If the webhook hasn't processed yet, calls verify-subscription
- * as a fallback to update the profile directly via Stripe API.
+ * After the Stripe checkout redirect (?subscription=success&session_id=...),
+ * asks the server to verify that checkout session and activate the plan in
+ * case the webhook has not arrived yet. Fires the Purchase pixel only for a
+ * plan the server confirmed. Once verified it saves a pending preview guide
+ * (AutoSaveGuide waits for this on the checkout return) before refreshing.
  */
 export function SubscriptionRefresh() {
   const router = useRouter()
   const searchParams = useSearchParams()
   const { toast } = useToast()
-  const [hasVerified, setHasVerified] = useState(false)
+  const started = useRef(false)
 
   useEffect(() => {
-    const subscription = searchParams.get("subscription")
-
-    if (subscription !== "success" || hasVerified) return
-    setHasVerified(true)
-
-    // Read plan here - MetaPixelPurchase (inside Suspense) mounts too late and
-    // misses the params after we call router.replace below. Fire pixel here instead.
-    const plan = searchParams.get("plan") as "pro" | "agency" | null
+    if (searchParams.get("subscription") !== "success" || started.current) return
+    started.current = true
+    const sessionId = searchParams.get("session_id")
 
     const verify = async () => {
       try {
-        // Call verify-subscription to ensure profile is updated
-        const res = await fetch("/api/verify-subscription", { method: "POST" })
-        const data = await res.json()
-
-        if (data.subscription_tier && data.subscription_tier !== "starter" && data.subscription_tier !== "free") {
-          toast({
-            title: "Subscription activated!",
-            description: `Your ${data.subscription_tier} plan is now active.`,
-          })
+        const res = await fetch("/api/verify-subscription", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(sessionId ? { session_id: sessionId } : {}),
+        })
+        const data = (await res.json()) as { subscription_tier?: string }
+        const tier = data.subscription_tier
+        // The plan may have changed: let AutoSaveGuide try a blocked draft again.
+        clearAutoSaveBlocks()
+        if (tier === "pro" || tier === "agency") {
+          await savePendingDraftAfterUpgrade()
+          MetaPixel.purchase(tier)
+          toast({ title: "Subscription activated!", description: `Your ${tier} plan is now active.` })
         } else {
           toast({
             title: "Processing subscription...",
@@ -47,19 +62,12 @@ export function SubscriptionRefresh() {
         console.error("[SubscriptionRefresh] Verify error:", error)
       }
 
-      // Fire Purchase pixel before clearing the URL - must happen here because
-      // MetaPixelPurchase (Suspense-wrapped) mounts after this effect clears params.
-      if (plan === "pro" || plan === "agency") {
-        MetaPixel.purchase(plan)
-      }
-
-      // Clean up URL and refresh page data
       router.replace("/dashboard", { scroll: false })
       router.refresh()
     }
 
-    verify()
-  }, [searchParams, router, toast, hasVerified])
+    void verify()
+  }, [searchParams, router, toast])
 
   return null
 }

@@ -9,12 +9,13 @@ import { createClient } from "@/lib/supabase-browser";
 import { Button } from "@/components/ui/button";
 import { AuthError } from "@/components/ui/auth-error";
 import { classifyAuthError } from "@/lib/auth-errors";
+import { safeRedirectPath } from "@/lib/safe-redirect";
 
 function SignInContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   // Route through /auth/claim so pending localStorage guides get saved before dashboard renders
-  const redirectTo = searchParams.get("redirectTo") ?? "/auth/claim";
+  const redirectTo = safeRedirectPath(searchParams.get("redirectTo"), "/auth/claim");
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -108,6 +109,8 @@ function SignInContent() {
           <div className="relative">
             <Mail className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
             <input
+              aria-label="Email"
+              autoComplete="email"
               placeholder="Email"
               type="email"
               value={email}
@@ -119,6 +122,8 @@ function SignInContent() {
           <div className="relative">
             <Lock className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
             <input
+              aria-label="Password"
+              autoComplete="current-password"
               placeholder="Password"
               type="password"
               value={password}

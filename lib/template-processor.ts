@@ -1,665 +1,198 @@
+import "server-only"
+import { readFile } from "node:fs/promises"
+import path from "node:path"
 import { traceable } from "langsmith/traceable"
+import type { BrandDetails } from "./brand-input"
+import { getSectionBody, replaceSectionBody } from "./content-parser"
+import { PLACEHOLDERS } from "./guide-placeholders"
+import Logger from "./logger"
 import {
-  generateBrandVoiceTraits,
-  generateStyleRules,
   generateAudienceSection,
   generateBeforeAfterSamples,
+  generateBrandVoiceTraits,
+  generateStyleRules,
   generateWordList,
-  getHowToUseContent,
+  type GenerateOptions,
+  type GenerationResult,
 } from "./openai"
 
-// Configuration for preview limits - easy to adjust for A/B testing
-// Rules and before/after no longer generated in preview (ContentGate hides them)
-export const PREVIEW_CONFIG = {
-  VISIBLE_TRAITS_FULL: 1,     // number of traits shown with full descriptions
-  VISIBLE_TRAITS_NAMES: 2,    // number of additional trait names shown
+/** Section ids (content-parser) of generated sections. */
+export type GeneratedSectionId = "brand-voice" | "audience" | "style-rules" | "examples" | "word-list"
+
+export interface RenderResult {
+  markdown: string
+  /** Sections whose generation failed. Paid sections keep their unlock placeholder. */
+  failedSections: GeneratedSectionId[]
 }
 
-// Auto-retry utility with logging
-const logGenerationMetrics = (operationName: string, success: boolean, attemptCount: number, error?: any) => {
-  const logData = {
-    operation: operationName,
-    success,
-    attempts: attemptCount,
-    timestamp: new Date().toISOString(),
-    error: error ? {
-      message: error.message,
-      stack: error.stack?.split('\n').slice(0, 3).join('\n') // First 3 lines only
-    } : null
-  };
-  
-  if (success) {
-    console.log(`[AI_GENERATION_SUCCESS] ${JSON.stringify(logData)}`);
-  } else {
-    console.error(`[AI_GENERATION_FAILURE] ${JSON.stringify(logData)}`);
-  }
-};
-
-const withRetry = async <T>(
-  operation: () => Promise<T>,
-  maxAttempts: number = 2,
-  operationName: string
-): Promise<T | null> => {
-  let lastError: any = null;
-  
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      console.log(`[${operationName}] Attempt ${attempt}/${maxAttempts}`);
-      const result = await operation();
-      
-      // Log success
-      logGenerationMetrics(operationName, true, attempt);
-      return result;
-    } catch (error) {
-      lastError = error;
-      console.error(`[${operationName}] Attempt ${attempt} failed:`, error);
-      
-      if (attempt < maxAttempts) {
-        // Brief delay before retry (exponential backoff)
-        await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
-      }
-    }
-  }
-  
-  // Log final failure
-  logGenerationMetrics(operationName, false, maxAttempts, lastError);
-  return null;
-};
-
-// Function to load a template file via API or from disk (server-side)
-export async function loadTemplate(templateName: string): Promise<string> {
-  console.log(`[loadTemplate] Called with templateName: "${templateName}"`)
-
-  try {
-    // Server-side: read from disk when possible (no NEXT_PUBLIC_APP_URL needed)
-    if (typeof window === 'undefined') {
-      try {
-        const path = await import('path')
-        const fs = await import('fs/promises')
-        const templatePath = path.join(process.cwd(), 'templates', `${templateName}.md`)
-        const content = await fs.readFile(templatePath, 'utf8')
-        console.log(`[loadTemplate] Loaded from disk: "${templateName}" (${content.length} chars)`)
-        return content
-      } catch (diskError) {
-        console.warn(`[loadTemplate] Disk read failed, falling back to API:`, diskError)
-      }
-    }
-
-    // Client-side or fallback: fetch from API
-    const baseUrl = typeof window !== 'undefined'
-      ? window.location.origin
-      : process.env.NEXT_PUBLIC_APP_URL || `http://localhost:${process.env.PORT || 3000}`
-
-    console.log(`[loadTemplate] Base URL: "${baseUrl}"`)
-    const fullUrl = `${baseUrl}/api/load-template?name=${templateName}`
-    const response = await fetch(fullUrl)
-    const data = await response.json()
-
-    if (!response.ok) {
-      console.error(`[loadTemplate] API error:`, data)
-      throw new Error(data.error || `Failed to load template: ${templateName}`)
-    }
-
-    console.log(`[loadTemplate] Loaded template "${templateName}" (${data.content?.length ?? 0} chars)`)
-    return data.content
-  } catch (error) {
-    console.error(`[loadTemplate] Error loading template ${templateName}:`, error)
-    throw new Error(`Failed to load template: ${templateName}`)
-  }
+interface PaidSection {
+  id: "style-rules" | "examples" | "word-list"
+  placeholder: string
+  generate: (details: BrandDetails, traitsContext: string | undefined, opts: GenerateOptions) => Promise<GenerationResult>
 }
 
-// Function to format markdown content for consistent display
-// Simple normalization for audience content: just fix whitespace/newlines
-function normalizeMarkdownContent(content: string | undefined): string {
-  if (!content) return ''
+const PAID_SECTIONS: PaidSection[] = [
+  { id: "style-rules", placeholder: PLACEHOLDERS.styleRules, generate: generateStyleRules },
+  { id: "examples", placeholder: PLACEHOLDERS.beforeAfter, generate: generateBeforeAfterSamples },
+  { id: "word-list", placeholder: PLACEHOLDERS.wordList, generate: generateWordList },
+]
 
-  return content
-    .replace(/\n{3,}/g, "\n\n") // Replace 3+ newlines with 2 (markdown blank line)
-    .replace(/\s+$/gm, "") // Remove trailing whitespace
-    .replace(/^\s+/gm, "") // Remove leading whitespace
-    .trim()
-}
+const TEMPLATE_PATH = path.join(process.cwd(), "templates", "style_guide_template.md")
+let templateCache: string | undefined
 
-function formatMarkdownContent(content: string | undefined): string {
-  if (!content) {
-    console.warn('Empty content passed to formatMarkdownContent')
-    return ''
-  }
-
-  // Step 0: Remove any main title since template handles it
-  let formatted = content.replace(/^#\s*.*Style.*Rules?.*$/im, '');
-
-  // Step 1: Clean up basic whitespace
-  let formatted2 = formatted
-    .replace(/\n{3,}/g, "\n\n") // Replace multiple newlines with double newlines
-    .replace(/\s+$/gm, "") // Remove trailing whitespace
-    .replace(/^\s+/gm, "") // Remove leading whitespace
-    .trim()
-
-  // Step 1.5: Convert section headers like '1. Spelling Conventions' to H2
-  formatted2 = formatted2.replace(/^(\d+\.?\s+[^\n]+)$/gm, '## $1');
-
-  // Step 1.6: Convert rule names (e.g. 'Company Name Spelling') to bold paragraph text, not headings
-  formatted2 = formatted2.replace(/^\*\*([^*\n]+)\*\*\s*$/gm, '<strong>$1</strong>');
-  // Remove any leftover H3/H4 for rule names
-  //formatted2 = formatted2.replace(/^#{3,4}\s*([^\n]+)$/gm, '<strong>$1</strong>');
-
-  // Step 1.7: Prevent wraps around spaced dashes/slashes; leave quotes untouched
-  // Convert patterns like "foo - bar" or "foo / bar" to use non-breaking spaces
-  // so they don't wrap awkwardly, without altering hyphenated words or quoted text.
-  // Use [a-zA-Z0-9] instead of \w to avoid matching emoji/Unicode characters
-  formatted2 = formatted2.replace(/([a-zA-Z0-9])\s+([\-\/])\s+([a-zA-Z0-9])/g, '$1\u00A0$2\u00A0$3');
-
-  // Step 1.8: Fix broken parentheses across line breaks
-  formatted2 = formatted2.replace(/\(\s*\n\s*/g, '(').replace(/\s*\n\s*\)/g, ')');
-
-  // Step 2: Standardize trait headings to H3
-  // Convert bold trait names to H3
-  formatted2 = formatted2.replace(/^\*\*([^*\n]+)\*\*(?!\n#)/gm, '### $1')
-  // Convert ## or #### trait names to H3
-  // formatted2 = formatted2.replace(/^#{2,}\s*([^\n]+)$/gm, '### $1')
-  // Convert plain trait names at the start of a block to H3 (followed by What It Means/Doesn't Mean or a description)
-  formatted2 = formatted2.replace(/^([A-Z][a-zA-Z ]{2,30})\n(?=(What It Means|What It Doesn\'t Mean|[A-Z][a-z]+))/gm, '### $1\n')
-  
-  // Step 3: Convert "What It Means" and "What It Doesn't Mean" to H4 with double spacing above
-  formatted2 = formatted2.replace(/^(?:\*\*\*?|__)?(What It (?:Doesn't )?Means?)(?:\*\*\*?|__)?/gm, '\n\n#### $1');
-  // Remove any extra blank lines that may result
-  formatted2 = formatted2.replace(/\n{3,}/g, '\n\n');
-  
-  // Step 4: Fix spacing for headings
-  formatted2 = formatted2
-    // Add newline after headings if not present
-    .replace(/^(#{1,6}\s[^\n]+)(?!\n)/gm, '$1\n')
-    // Ensure exactly one blank line before headings (except at start)
-    .replace(/([^\n])\n(#{1,6}\s)/g, '$1\n\n$2')
-
-  // Step 6: Fix spacing for examples (no Right/Wrong text)
-  formatted2 = formatted2
-    // Normalize spacing after ✅ and ❌ (no Right/Wrong text expected)
-    .replace(/(✅|❌)\s*/g, '$1 ')
-    // Ensure each example is on its own line
-    .replace(/(✅[^\n]+)\s+(❌)/g, '$1\n$2')
-    // Add newline after each example if not present
-    .replace(/(✅[^\n]+|❌[^\n]+)(?!\n)/g, '$1\n')
-    // Ensure examples are grouped together with single line spacing
-    .replace(/(✅[^\n]+)\n\n(❌)/g, '$1\n$2')
-    // Join orphan trailing letters on the next line BEFORE adding italics
-    // Example: "✅ Financial Data Analysis Tool\ns" => "✅ Financial Data Analysis Tools"
-    .replace(/^(✅|❌)\s+([^\n]+)\n([a-z]{1,3})(?=\n)/gm, '$1 $2$3')
-    // Wrap example text in italics for UI rendering (after joins)
-    .replace(/^(✅|❌)\s+(.+)$/gm, '$1 *$2*')
-
-  // Step 7: Fix spacing for lists and arrows
-  formatted2 = formatted2
-    // Normalize arrow spacing
-    .replace(/^→\s*/gm, '→ ')
-    // Normalize x mark spacing
-    .replace(/^✗\s*/gm, '✗ ')
-    // Add newline after list items if not present
-    .replace(/^([-→✗]\s[^\n]+)(?!\n)/gm, '$1\n')
-
-  // Step 8: Fix punctuation issues - prevent quotes/periods from breaking to new lines
-  formatted2 = formatted2
-    // Fix dangling quotes and punctuation
-    .replace(/(\w+)\s+([,.!?:;"])(\s*\n)/g, '$1$2$3')
-    // Ensure there's no space before periods/commas (exclude " to preserve space before opening quotes)
-    .replace(/\s+([,.!?:;])/g, '$1')
-    // Fix word breaking with non-breaking space for single character endings
-    .replace(/(\w+)(\s*\n\s*)([a-z])(\s*\n)/g, '$1$3$4')
-
-  // Step 9: Fix section spacing
-  formatted2 = formatted2
-    // Ensure sections are separated by exactly one blank line
-    .replace(/\n{3,}/g, '\n\n')
-    // Extra spacing before/after What It Means/Doesn't Mean sections
-    .replace(/(####\s+What It (?:Doesn't )?Means?)\n/g, '$1\n\n')
-
-  // Step 10: Ensure space after colon
-  formatted2 = formatted2.replace(/:(\S)/g, ': $1')
-
-  return formatted2;
-}
-
-// Function to validate markdown content
-function validateMarkdownContent(content: string | undefined): boolean {
-  if (!content || typeof content !== 'string') {
-    console.warn('Invalid content passed to validateMarkdownContent')
-    return false
-  }
-
-  // Clean the content first
-  const cleanedContent = content
-    .replace(/```markdown\n?/g, '') // Remove markdown code block markers
-    .replace(/```\n?/g, '') // Remove any remaining code block markers
-    .replace(/^\s+|\s+$/g, '') // Trim whitespace
-    .replace(/\n{3,}/g, '\n\n') // Replace multiple newlines with double
-
-  // Check for basic markdown structure
-  const hasHeaders = /^#{1,6}\s.+/m.test(cleanedContent)
-  const hasFormatting = /[*_`]/.test(cleanedContent)
-  
-  if (!hasHeaders) {
-    console.warn('Content missing required markdown header')
-    return false
-  }
-  
-  // For voice traits, check for trait structure
-  if (cleanedContent.toLowerCase().includes('trait')) {
-    const hasTraitSections = (
-      cleanedContent.includes("What It Means") || 
-      cleanedContent.includes("Description") ||
-      cleanedContent.includes("What It Doesn't Mean") ||
-      cleanedContent.includes("Guidelines") ||
-      cleanedContent.includes("Avoid")
-    )
-    if (!hasTraitSections) {
-      console.warn('Voice trait content missing required sections')
-    }
-    return hasHeaders && hasTraitSections
-  }
-  
-  // For rules, check for example structure
-  if (cleanedContent.toLowerCase().includes('rule')) {
-    // Accept any of these as valid example lines:
-    // ✅ *example text*
-    // ❌ *example text*
-    const hasCorrect = cleanedContent.match(/(^|\n)✅/)
-    const hasIncorrect = cleanedContent.match(/(^|\n)❌/)
-    const hasRuleHeader = cleanedContent.match(/^###\s.+/m)
-    if (!hasCorrect || !hasIncorrect || !hasRuleHeader) {
-      console.warn('Rule content missing required example structure')
-      return false
-    }
-    return true
-  }
-  
-  // If neither traits nor rules, just check for basic markdown
-  return hasHeaders && hasFormatting
-}
-
-// Add validation function
-function validateBrandDetails(details: any) {
-  const errors: string[] = []
-  
-  // Name validation
-  if (!details.name || details.name.trim().length === 0) {
-    errors.push("Brand name is required")
-  } else if (details.name.length > 50) {
-    errors.push("Brand name must be 50 characters or less")
-  }
-  
-  // Description validation
-  if (!details.brandDetailsDescription || details.brandDetailsDescription.trim().length === 0) {
-    errors.push("Brand description is required")
-  } else if (details.brandDetailsDescription.length > 2500) {
-    errors.push("Brand description must be 2500 characters or less")
-  }
-  
-  // Audience validation
-  if (!details.audience || details.audience.trim().length === 0) {
-    errors.push("Target audience is required")
-  } else if (details.audience.length > 500) {
-    errors.push("Target audience must be 500 characters or less")
-  }
-  
-  // Tone is optional - voice is now defined by selected traits
-  
-  return errors
-}
-
-// Function to prepare markdown content for React component rendering
-async function prepareMarkdownContent(markdown: string): Promise<string> {
-  // Simply return the markdown content - react-markdown will handle the rendering
-  return markdown
-}
-
-// Helper function to format the current date
-function formatDate(): string {
-  const date = new Date()
-  const day = date.getDate()
-  const month = date.toLocaleString("default", { month: "long" })
-  const year = date.getFullYear()
-  return `${day} ${month} ${year}`
-}
-
-// Generic content for preview
-const GENERIC_VOICE_TRAIT_1 = `**Clear & Concise**
-
-What It Means
-→ Use simple, direct language that anyone can understand.
-→ Break down complex ideas into easy steps.
-→ Keep sentences short and to the point.
-
-What It Doesn't Mean
-✗ Leaving out important details for the sake of brevity.
-✗ Using jargon or technical terms without explanation.
-✗ Oversimplifying topics that need nuance.`;
-
-const GENERIC_VOICE_TRAIT_2 = `**Friendly & Approachable**
-
-What It Means
-→ Write as if you're talking to a real person.
-→ Use a warm, welcoming tone in every message.
-→ Encourage questions and feedback.
-
-What It Doesn't Mean
-✗ Being overly casual or unprofessional.
-✗ Using slang that not everyone will understand.
-✗ Ignoring the needs or concerns of your audience.`;
-
-// AI Writing Cleanup rules (adapted from deslop.md, included in every guide for all tiers)
-const AI_WRITING_CLEANUP_CONTENT = `Use these rules to clean up AI-generated drafts before publishing. They work whether you're editing by hand or giving instructions to an AI tool.
-
-### Phrasing
-
-**1. Em dashes** - Remove em dashes (the long dash character). Rewrite using commas, full stops, or restructure the sentence. One or two in a long piece is fine. Three or more is a pattern.
-
-**2. Corrective antithesis** - Remove "Not X. But Y." constructions where you set up something the reader never assumed and then correct it for drama. Just say what you mean.
-- Before: "This isn't because they don't trust the technology. It's because they can't predict it."
-- After: "They trust the technology fine. What they can't do is predict it."
-
-**3. Dramatic pivot phrases** - Remove "But here's the thing.", "Here's the catch.", "Here's what most people miss." and similar theatrical pivots. Fold the point into the sentence naturally.
-- Before: "The patterns are valuable. But here's the bind: building a tool cost more than most could justify."
-- After: "The patterns are valuable but building a tool to capture them cost more than most could justify."
-
-**4. Soft hedging language** - Remove filler hedges: "It's worth noting that", "Something we've observed", "It's important to remember". Say the thing.
-- Before: "It's worth noting that this approach has shown some promising results in certain contexts."
-- After: "This approach works."
-
-### Rhythm
-
-**5. Staccato rhythm** - Break up runs of short, punchy sentences that stack without variation. Combine some. Lengthen others. Let the rhythm follow the thinking.
-- Before: "Now, agents act. They send emails. They modify code. They book appointments."
-- After: "Agents are starting to do real things now. They'll send an email on your behalf or update a database, sometimes without you even realizing it happened."
-
-**6. Cookie-cutter paragraphs** - Vary paragraph length. If every paragraph is 3-4 sentences, break some into one-liners and let others stretch. The shape of the text should look uneven, like real thinking.
-
-**7. Gift-wrapped endings** - Remove summary conclusions that restate the article's points. Cut "In summary", "In conclusion", "Ultimately", "Moving forward". End with something specific or unresolved. Trust the reader.
-- Before: "In summary, by focusing on clear communication, consistent feedback, and mutual trust, teams can build stronger relationships."
-- After: "The best teams I've worked with never talked about trust. They just had it."
-
-**8. Throat-clearing intros** - Remove "Let's explore", "Let's unpack", "Let's dive in", "In this article, we'll". Just start.
-- Before: "In this article, we'll explore the hidden costs of micromanagement. Let's dive in."
-- After: "I micromanaged someone last Tuesday."
-
-### Authenticity
-
-**9. Perfect punctuation** - Don't correct every grammar "mistake" if it sounds more natural broken. Fragments are fine. Starting with "And" or "But" is fine. If the draft has personality in its punctuation, keep it.
-
-**10. Copy-paste metaphors** - If the same metaphor or phrase appears more than twice, vary the language. Use a pronoun, rephrase it, or trust the reader to remember.
-- Before: "Trust is like a battery. When the trust battery is full... But when the trust battery runs low... To recharge the trust battery..."
-- After: "Trust is like a battery. When it's full, you barely think about it. But let it drain and suddenly every interaction needs a charger."
-
-**11. Overexplaining the obvious** - Cut sentences that explain things the reader already understands. If you've made a clear point, don't re-explain how it works.
-- Before: "Trust is earned over time. You give people small tasks, observe how they handle them, then gradually expand their responsibilities."
-- After: "Trust is earned. Everyone knows this. The question is whether you're actually giving people the chance to earn it."
-
-**12. Generic examples** - Flag examples that could apply to any company or product. If an example doesn't contain a specific or surprising detail, it's filler. Make it sharp or cut it.
-- Before: "Take Slack, for example. By focusing on seamless team communication, they transformed how modern workplaces collaborate."
-- After: "Slack solved the wrong problem brilliantly. Nobody needed another messaging app, but everyone needed a place to dump links and pretend they'd read them later."`;
-
-// Shared function to render style guide template (unified template, isPreview for free-tier flow)
-// Wrapped with traceable so all child LLM calls appear nested under one parent span in LangSmith
-export const renderStyleGuideTemplate = traceable(
-  async function renderStyleGuideTemplate({
-    brandDetails,
-    useAIContent = false,
-    isPreview = false,
-    userEmail,
-  }: {
-    brandDetails: any;
-    useAIContent?: boolean;
-    isPreview?: boolean;
-    userEmail?: string | null;
-  }): Promise<string> {
-  console.log(`[renderStyleGuideTemplate] isPreview=${isPreview}, useAIContent=${useAIContent}`);
-
-  const template = await loadTemplate("style_guide_template");
-  const formattedDate = new Date().toLocaleDateString("en-US", {
-    day: "numeric",
-    month: "long",
-    year: "numeric",
-  });
-  const brandName = brandDetails.name || "Your Brand";
-  // Contact footer: use user email when available; fallback for preview/unauthed
-  const contactFooter =
-    userEmail && userEmail.trim()
-      ? `Questions about ${brandName} content? Contact ${userEmail.trim()}.`
-      : `Questions? Contact the ${brandName} content team.`;
-  const brandDesc =
-    brandDetails.brandDetailsDescription ||
-    brandDetails.brandDetailsText ||
-    "An innovative company focused on delivering exceptional results.";
-  const audience = brandDetails.audience || "Business professionals and decision makers";
-
-  // Contact section
-  const contactSection = userEmail && userEmail.trim()
-    ? `Need help applying these guidelines? Have questions about ${brandName}'s voice?\n\n**Contact:** ${userEmail.trim()}`
-    : `Need help applying these guidelines? Have questions about ${brandName}'s voice?\n\nContact the ${brandName} content team.`;
-
-  let result = template
-    .replace(/{{DD MONTH YYYY}}/g, formattedDate)
-    .replace(/{{brand_name}}/g, brandName)
-    .replace(/{{brand_description}}/g, brandDesc)
-    .replace(/{{brand_audience}}/g, audience)
-    .replace(/{{contact_section}}/g, contactSection)
-    .replace(/{{ai_writing_cleanup}}/g, AI_WRITING_CLEANUP_CONTENT);
-
-  if (!useAIContent) {
-    result = result
-      .replace(/{{audience_section}}/g, "_Your audience will be described here._")
-      .replace(/{{how_to_use_section}}/g, getHowToUseContent(brandName))
-      .replace(/{{brand_voice_traits}}/g, `${GENERIC_VOICE_TRAIT_1}\n\n${GENERIC_VOICE_TRAIT_2}`)
-      .replace(/{{style_rules}}/g, "_Unlock to see Style Rules._")
-      .replace(/{{before_after_examples}}/g, "_Unlock to see Before/After examples._")
-      .replace(/{{word_list}}/g, "_Unlock to see Word List._");
-    return await prepareMarkdownContent(result);
-  }
-
-  const validatedDetails = {
-    name: brandName,
-    brandDetailsDescription: brandDesc,
-    audience: audience.trim() || "general audience",
-    traits: brandDetails.traits || [],
-    keywords: Array.isArray(brandDetails.keywords) ? brandDetails.keywords : [],
-    productsServices: Array.isArray(brandDetails.productsServices)
-      ? brandDetails.productsServices
-      : [],
-    formalityLevel: brandDetails.formalityLevel || "",
-    readingLevel: brandDetails.readingLevel || "",
-    englishVariant: brandDetails.englishVariant || "american",
-  };
-
-  // generateAudienceSection derives the audience from brandDetailsDescription directly —
-  // no need to pre-enrich a vague audience field with a separate blocking LLM call
-  let traitsContext: string | undefined;
-  let brandVoiceContent: string;
-
-  // Kick off audience generation immediately — it's independent of traits, so run in parallel
-  const audiencePromise = isPreview ? generateAudienceSection(validatedDetails) : null;
-
-  if (brandDetails.previewTraits) {
-    brandVoiceContent = brandDetails.previewTraits;
-    const traitNames = (validatedDetails.traits as any[])
-      .map((t) => (typeof t === "string" ? t : t?.name))
-      .filter(Boolean);
-    traitsContext = [traitNames.length ? `Selected Traits: ${traitNames.join(", ")}` : "", brandVoiceContent]
-      .filter(Boolean)
-      .join("\n\n")
-      .slice(0, 4000);
-  } else {
-    const traitsResult = await generateBrandVoiceTraits(validatedDetails);
-    if (traitsResult.success && traitsResult.content) {
-      brandVoiceContent = traitsResult.content;
-      const traitNames = (validatedDetails.traits as any[])
-        .map((t) => (typeof t === "string" ? t : t?.name))
-        .filter(Boolean);
-      traitsContext = [traitNames.length ? `Selected Traits: ${traitNames.join(", ")}` : "", brandVoiceContent]
-        .filter(Boolean)
-        .join("\n\n")
-        .slice(0, 4000);
-    } else {
-      brandVoiceContent = "_Could not generate brand voice traits._";
-      traitsContext = undefined;
-    }
-  }
-
-  result = result.replace(/{{brand_voice_traits}}/g, formatMarkdownContent(brandVoiceContent));
-  result = result.replace(/{{how_to_use_section}}/g, getHowToUseContent(brandName));
-
-  if (isPreview) {
-    // audiencePromise was started before traits — just await the already-running call
-    const audienceResult = await audiencePromise!;
-    result = result.replace(
-      /{{audience_section}}/g,
-      audienceResult.success && audienceResult.content
-        ? normalizeMarkdownContent(audienceResult.content)
-        : "_Could not generate audience section._"
-    );
-    result = result.replace(/{{style_rules}}/g, "_Unlock to see Style Rules._");
-    result = result.replace(/{{before_after_examples}}/g, "_Unlock to see Before/After examples._");
-    result = result.replace(/{{word_list}}/g, "_Unlock to see Word List._");
-  } else {
-    const [rulesResult, beforeAfterResult, wordListResult, audienceResult] = await Promise.all([
-      generateStyleRules(validatedDetails, traitsContext),
-      generateBeforeAfterSamples(validatedDetails, traitsContext),
-      generateWordList(validatedDetails, traitsContext),
-      generateAudienceSection(validatedDetails),
-    ]);
-    result = result.replace(
-      /{{style_rules}}/g,
-      rulesResult.success && rulesResult.content ? formatMarkdownContent(rulesResult.content) : "_Could not generate rules._"
-    );
-    result = result.replace(
-      /{{before_after_examples}}/g,
-      beforeAfterResult.success && beforeAfterResult.content
-        ? beforeAfterResult.content
-        : "_Could not generate before/after examples._"
-    );
-    result = result.replace(
-      /{{word_list}}/g,
-      wordListResult.success && wordListResult.content ? wordListResult.content : "_Could not generate word list._"
-    );
-    result = result.replace(
-      /{{audience_section}}/g,
-      audienceResult.success && audienceResult.content ? normalizeMarkdownContent(audienceResult.content) : "_Could not generate audience._"
-    );
-  }
-
-  return await prepareMarkdownContent(result);
-  },
-  { name: "renderStyleGuideTemplate", run_type: "chain" }
-)
-
-// Render preview-style guide (free-tier: traits + audience + content guidelines, locked sections get placeholders)
-export async function renderPreviewStyleGuide({ brandDetails }: { brandDetails: any }): Promise<string> {
-  console.log(`[renderPreviewStyleGuide] Generating preview for:`, brandDetails?.name || "not set");
-  return renderStyleGuideTemplate({ brandDetails, useAIContent: true, isPreview: true });
+/** The guide template, read from disk once (the build traces templates/ into the routes). */
+export async function loadTemplate(): Promise<string> {
+  templateCache ??= await readFile(TEMPLATE_PATH, "utf8")
+  return templateCache
 }
 
 /**
- * Generate full guide by merging preview content with newly generated locked sections.
- * Preserves the preview the user liked; only generates Style Rules, Before/After, Word List.
+ * Replace `{{key}}` placeholders in one pass. Values are inserted literally
+ * (no `$&`/`$'` patterns, AI-18) and are not rescanned. Unknown keys stay.
+ */
+export function fillTemplate(template: string, vars: Record<string, string>): string {
+  return template.replace(/\{\{(\w+)\}\}/g, (match, key: string) =>
+    Object.prototype.hasOwnProperty.call(vars, key) ? vars[key] : match,
+  )
+}
+
+const TRAITS_CONTEXT_LIMIT = 4000
+
+/** Selected trait names plus the Brand Voice section of a guide, for the paid-section prompts (AI-7). */
+export function extractTraitsContext(markdown: string, traitNames: string[]): string | undefined {
+  const parts = [traitNames.length ? `Selected Traits: ${traitNames.join(", ")}` : "", getSectionBody(markdown, "brand-voice")]
+  const context = parts.filter(Boolean).join("\n\n").slice(0, TRAITS_CONTEXT_LIMIT)
+  return context || undefined
+}
+
+/** Body of the "Questions?" section. */
+export function contactSection(brandName: string, userEmail?: string | null): string {
+  const intro = `Need help applying these guidelines? Have questions about ${brandName}'s voice?`
+  const email = userEmail?.trim()
+  return email ? `${intro}\n\n**Contact:** ${email}` : `${intro}\n\nContact the ${brandName} content team.`
+}
+
+/** Generate the paid sections in parallel. Failed ones keep their placeholder. */
+async function generatePaidSections(
+  sections: PaidSection[],
+  details: BrandDetails,
+  traitsContext: string | undefined,
+  opts: GenerateOptions,
+): Promise<{ content: Record<string, string>; failed: GeneratedSectionId[] }> {
+  const results = await Promise.all(sections.map((s) => s.generate(details, traitsContext, opts)))
+  const content: Record<string, string> = {}
+  const failed: GeneratedSectionId[] = []
+  sections.forEach((section, i) => {
+    const result = results[i]
+    if (result.success && result.content) {
+      content[section.id] = result.content
+    } else {
+      content[section.id] = section.placeholder
+      failed.push(section.id)
+    }
+  })
+  return { content, failed }
+}
+
+function logFailures(operation: string, failed: GeneratedSectionId[]) {
+  if (failed.length) Logger.warn("Guide sections failed to generate", { operation, failed })
+}
+
+/**
+ * Render a new guide from the template.
+ * Preview (starter): Brand Voice and Audience; paid sections are locked placeholders.
+ * Full (paid): all sections.
+ */
+export const renderStyleGuideTemplate = traceable(
+  async function renderStyleGuideTemplate({
+    brandDetails,
+    isPreview,
+    userEmail,
+    signal,
+  }: {
+    brandDetails: BrandDetails
+    isPreview: boolean
+    userEmail?: string | null
+    signal?: AbortSignal
+  }): Promise<RenderResult> {
+    const opts: GenerateOptions = { signal }
+
+    // Audience does not depend on the traits, so it runs alongside them.
+    const audiencePromise = generateAudienceSection(brandDetails, opts)
+    const traitsResult = await generateBrandVoiceTraits(brandDetails, opts)
+    const brandVoice = traitsResult.content ?? ""
+
+    let paid: Record<string, string> = Object.fromEntries(PAID_SECTIONS.map((s) => [s.id, s.placeholder]))
+    let paidFailed: GeneratedSectionId[] = []
+    if (!isPreview) {
+      const traitsContext = extractTraitsContext(`## Brand Voice\n\n${brandVoice}`, brandDetails.traits)
+      const generated = await generatePaidSections(PAID_SECTIONS, brandDetails, traitsContext, opts)
+      paid = generated.content
+      paidFailed = generated.failed
+    }
+
+    const audienceResult = await audiencePromise
+    const failed: GeneratedSectionId[] = [
+      ...(traitsResult.success ? [] : (["brand-voice"] as const)),
+      ...(audienceResult.success ? [] : (["audience"] as const)),
+      ...paidFailed,
+    ]
+
+    const markdown = fillTemplate(await loadTemplate(), {
+      brand_name: brandDetails.name,
+      brand_description: brandDetails.brandDetailsDescription,
+      audience_section: audienceResult.content ?? "",
+      brand_voice_traits: brandVoice,
+      style_rules: paid["style-rules"],
+      before_after_examples: paid.examples,
+      word_list: paid["word-list"],
+      contact_section: contactSection(brandDetails.name, userEmail),
+    }).trim()
+
+    logFailures(isPreview ? "preview" : "full", failed)
+    return { markdown, failedSections: failed }
+  },
+  { name: "renderStyleGuideTemplate", run_type: "chain" },
+)
+
+/**
+ * Upgrade a preview: generate only the paid sections that are still locked
+ * and merge them into the existing guide. Everything else is kept as the user
+ * saw (or edited) it. Failed sections keep their placeholder (AI-6).
  */
 export const renderFullGuideFromPreview = traceable(
   async function renderFullGuideFromPreview({
     previewContent,
     brandDetails,
     userEmail,
+    signal,
   }: {
-    previewContent: string;
-    brandDetails: any;
-    userEmail?: string | null;
-  }): Promise<string> {
-  const { replaceSectionInMarkdown } = await import("./content-parser");
-  const brandName = brandDetails.name || "Your Brand";
-  const contactFooter =
-    userEmail && userEmail.trim()
-      ? `Questions about ${brandName} content? Contact ${userEmail.trim()}.`
-      : `Questions? Contact the ${brandName} content team.`;
+    previewContent: string
+    brandDetails: BrandDetails
+    userEmail?: string | null
+    signal?: AbortSignal
+  }): Promise<RenderResult> {
+    const locked = PAID_SECTIONS.filter((s) => getSectionBody(previewContent, s.id).includes(s.placeholder))
+    const traitsContext = extractTraitsContext(previewContent, brandDetails.traits)
+    const { content, failed } = await generatePaidSections(locked, brandDetails, traitsContext, { signal })
 
-  const validatedDetails = {
-    name: brandName,
-    brandDetailsDescription: brandDetails.brandDetailsDescription || brandDetails.brandDetailsText || "",
-    audience: brandDetails.audience || "general audience",
-    traits: brandDetails.traits || [],
-    keywords: Array.isArray(brandDetails.keywords) ? brandDetails.keywords : [],
-    formalityLevel: brandDetails.formalityLevel || "",
-    readingLevel: brandDetails.readingLevel || "",
-    englishVariant: brandDetails.englishVariant || "american",
-  };
+    let merged = previewContent
+    for (const section of locked) {
+      if (failed.includes(section.id)) continue
+      const body = getSectionBody(merged, section.id).replace(section.placeholder, () => content[section.id])
+      merged = replaceSectionBody(merged, section.id, body)
+    }
+    // Fill in the user's email only while the contact section is still our
+    // default text; never overwrite contact details the user wrote.
+    const norm = (t: string) => t.replace(/\s+/g, " ").trim()
+    const currentContact = norm(getSectionBody(merged, "contact"))
+    const defaults = [contactSection(brandDetails.name, null), contactSection(brandDetails.name, userEmail)].map(norm)
+    if (defaults.includes(currentContact)) {
+      merged = replaceSectionBody(merged, "contact", contactSection(brandDetails.name, userEmail))
+    }
 
-  const traitNames = (validatedDetails.traits as any[])
-    .map((t) => (typeof t === "string" ? t : t?.name))
-    .filter(Boolean);
-  const brandVoiceMatch = previewContent.match(/## Brand Voice([\s\S]*?)(?=##|$)/);
-  const traitsContext = brandVoiceMatch
-    ? [traitNames.length ? `Selected Traits: ${traitNames.join(", ")}` : "", brandVoiceMatch[1].trim()]
-        .filter(Boolean)
-        .join("\n\n")
-        .slice(0, 4000)
-    : undefined;
-
-  const [rulesResult, beforeAfterResult, wordListResult] = await Promise.all([
-    generateStyleRules(validatedDetails, traitsContext),
-    generateBeforeAfterSamples(validatedDetails, traitsContext),
-    generateWordList(validatedDetails, traitsContext),
-  ]);
-
-  const styleRulesContent =
-    rulesResult.success && rulesResult.content
-      ? formatMarkdownContent(rulesResult.content)
-      : "_Could not generate rules._";
-  const beforeAfterContent =
-    beforeAfterResult.success && beforeAfterResult.content
-      ? beforeAfterResult.content
-      : "_Could not generate before/after examples._";
-  const wordListContent =
-    wordListResult.success && wordListResult.content
-      ? wordListResult.content
-      : "_Could not generate word list._";
-
-  let merged = previewContent;
-
-  // Log before replacement for debugging
-  console.log("[renderFullGuideFromPreview] Replacing sections...");
-
-  const beforeRules = merged;
-  merged = replaceSectionInMarkdown(merged, "style-rules", `## Style Rules\n\n${styleRulesContent}`);
-  if (merged === beforeRules) {
-    console.warn("[renderFullGuideFromPreview] Section replacement failed for style-rules, using fallback");
-    // Fallback: direct string replacement for placeholder
-    merged = merged.replace(
-      /## Style Rules\s*\n+_Unlock to see Style Rules\._/g,
-      `## Style Rules\n\n${styleRulesContent}`
-    );
-  }
-
-  const beforeExamples = merged;
-  merged = replaceSectionInMarkdown(merged, "examples", `## Before / After\n\n${beforeAfterContent}`);
-  if (merged === beforeExamples) {
-    console.warn("[renderFullGuideFromPreview] Section replacement failed for examples, using fallback");
-    merged = merged.replace(
-      /## Before \/ After\s*\n+_Unlock to see Before\/After examples\._/g,
-      `## Before / After\n\n${beforeAfterContent}`
-    );
-  }
-
-  const beforeWordList = merged;
-  merged = replaceSectionInMarkdown(merged, "word-list", `## Word List\n\n${wordListContent}`);
-  if (merged === beforeWordList) {
-    console.warn("[renderFullGuideFromPreview] Section replacement failed for word-list, using fallback");
-    merged = merged.replace(
-      /## Word List\s*\n+_Unlock to see Word List\._/g,
-      `## Word List\n\n${wordListContent}`
-    );
-  }
-
-  // Update Questions section with user email if available
-  const questionsSection = `## Questions?\n\n${contactFooter}`;
-  merged = replaceSectionInMarkdown(merged, "questions", questionsSection);
-
-  return merged;
+    logFailures("expand", failed)
+    return { markdown: merged, failedSections: failed }
   },
-  { name: "renderFullGuideFromPreview", run_type: "chain" }
+  { name: "renderFullGuideFromPreview", run_type: "chain" },
 )

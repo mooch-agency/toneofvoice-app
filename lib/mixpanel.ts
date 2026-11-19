@@ -11,7 +11,7 @@ function isReady() {
   if (typeof window === "undefined") return false
   if (process.env.NODE_ENV === "development") return false
   // Guard against calls before MixpanelProvider has run init()
-  if (!mixpanel.__loaded) return false
+  if (!(mixpanel as unknown as { __loaded?: boolean }).__loaded) return false
   return true
 }
 
@@ -28,5 +28,12 @@ export function identify(userId: string, properties?: Properties) {
     if (!isReady()) return
     mixpanel.identify(userId)
     if (properties) mixpanel.people.set(properties)
+  } catch {}
+}
+
+/** Forget the identified user (call on sign-out) so the next visitor gets a fresh distinct id. */
+export function reset() {
+  try {
+    if (isReady()) mixpanel.reset()
   } catch {}
 }

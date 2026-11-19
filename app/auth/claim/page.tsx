@@ -3,12 +3,12 @@
 import { useEffect, useRef } from "react"
 import { useRouter } from "next/navigation"
 import { useAuth } from "@/components/AuthProvider"
+import { readPendingDraft, savePendingDraft } from "@/lib/pending-draft"
 
 /**
- * Intercept page between auth completion and dashboard.
- * Saves any pending localStorage guide to the DB before the
- * dashboard server component renders, so the guide is visible
- * immediately instead of flashing "No style guides yet".
+ * Landing page after sign-in/sign-up. Saves a fresh pending preview guide to
+ * the account before the dashboard renders, so it shows up straight away.
+ * Failures fall through to AutoSaveGuide on the dashboard, which tells the user.
  */
 export default function ClaimPage() {
   const { user, loading: authLoading } = useAuth()
@@ -16,64 +16,23 @@ export default function ClaimPage() {
   const attempted = useRef(false)
 
   useEffect(() => {
-    // Wait for auth to settle
-    if (authLoading) return
-    // Guard against double-runs
-    if (attempted.current) return
+    if (authLoading || attempted.current) return
     attempted.current = true
 
-    // No user somehow - send to sign-in
     if (!user) {
       router.replace("/sign-in")
       return
     }
 
-    const brandDetails = localStorage.getItem("brandDetails")
-    const previewContent = localStorage.getItem("previewContent")
-
-    // Nothing to claim - go straight to dashboard
-    if (!brandDetails || !previewContent) {
+    const draft = readPendingDraft()
+    if (!draft) {
       router.replace("/dashboard")
       return
     }
 
-    // Save the pending guide before navigating to dashboard
-    const claimGuide = async () => {
-      try {
-        const parsed = JSON.parse(brandDetails)
-        const res = await fetch("/api/save-style-guide", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            title: `${parsed.name || "Brand"} Style Guide`,
-            brand_name: parsed.name || "Brand",
-            content_md: previewContent,
-            plan_type: "style_guide",
-            brand_details: parsed,
-          }),
-        })
-
-        if (res.ok) {
-          const data = await res.json().catch(() => null)
-          if (data?.guide?.id) {
-            // Clean up localStorage so AutoSaveGuide doesn't re-save
-            localStorage.removeItem("previewContent")
-            localStorage.setItem("savedGuideId", data.guide.id)
-            console.log("[claim] Guide saved:", data.guide.id)
-          }
-        } else {
-          console.warn("[claim] Save failed, falling back to AutoSaveGuide")
-        }
-      } catch (err) {
-        console.error("[claim] Error saving guide:", err)
-        // AutoSaveGuide on dashboard will retry
-      }
-
-      // Always redirect to dashboard regardless of outcome
-      router.replace("/dashboard")
-    }
-
-    claimGuide()
+    savePendingDraft(draft)
+      .catch((err) => console.error("[claim] Could not save guide:", err))
+      .finally(() => router.replace("/dashboard"))
   }, [user, authLoading, router])
 
   return (

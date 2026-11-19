@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import {
   Dialog,
@@ -12,7 +12,8 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Loader2, Sparkles, ArrowRight, CheckCircle } from "lucide-react";
-import { detectInputType, validateInput, sanitizeInput } from "@/lib/input-utils";
+import { detectInputType, sanitizeInput } from "@/lib/input-utils";
+import { useExtraction } from "@/hooks/use-extraction";
 import Link from "next/link";
 
 interface CreateGuideModalProps {
@@ -20,277 +21,46 @@ interface CreateGuideModalProps {
   onOpenChange: (open: boolean) => void;
 }
 
-// Progressive loading word arrays
-const descriptionWords = ["Thinking...", "Exploring...", "Assembling...", "Creating..."];
-const urlWords = ["Reading...", "Understanding...", "Assembling...", "Creating..."];
-
 export function CreateGuideModal({ open, onOpenChange }: CreateGuideModalProps) {
   const router = useRouter();
-  const [url, setUrl] = useState("");
-  const [error, setError] = useState("");
-  const [errorType, setErrorType] = useState<string | null>(null);
-  const [isExtracting, setIsExtracting] = useState(false);
-  const [isSuccess, setIsSuccess] = useState(false);
-  const [loadingMessage, setLoadingMessage] = useState("");
-  const [extractionStartTime, setExtractionStartTime] = useState<number | null>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const {
+    url,
+    setUrl,
+    error,
+    clearError,
+    reset,
+    isExtracting,
+    isSuccess,
+    loadingMessage,
+    inputRef,
+    handleExtraction,
+    isInputValid,
+  } = useExtraction<HTMLInputElement>({
+    focusOnGetStarted: false,
+    // Show the success state briefly, then close the modal and open the preview
+    onSuccess: () => {
+      closeTimer.current = setTimeout(() => {
+        onOpenChange(false);
+        router.push("/guide?generate=preview");
+      }, 800);
+    },
+  });
+
+  useEffect(() => () => clearTimeout(closeTimer.current), []);
 
   // Focus input when modal opens
   useEffect(() => {
-    if (open && inputRef.current) {
-      // Small delay to ensure modal is fully rendered
-      setTimeout(() => {
-        inputRef.current?.focus();
-      }, 100);
-    }
-  }, [open]);
+    if (!open) return;
+    const t = setTimeout(() => inputRef.current?.focus(), 100);
+    return () => clearTimeout(t);
+  }, [open, inputRef]);
 
-  // Reset state when modal closes (but don't reset if extraction is in progress)
+  // Reset state when modal closes (but not while extraction is in progress)
   useEffect(() => {
-    if (!open && !isExtracting) {
-      setUrl("");
-      setError("");
-      setErrorType(null);
-      setIsSuccess(false);
-      setLoadingMessage("");
-      setExtractionStartTime(null);
-    }
+    if (!open && !isExtracting) reset();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, isExtracting]);
-
-  // Cycle through loading messages
-  useEffect(() => {
-    if (!isExtracting || !extractionStartTime) return;
-
-    const isUrl = url.trim().startsWith("http") || url.trim().includes(".");
-    const words = isUrl ? urlWords : descriptionWords;
-
-    const interval = setInterval(() => {
-      const elapsed = Date.now() - extractionStartTime;
-      const wordIndex = Math.floor(elapsed / 2000) % words.length;
-      setLoadingMessage(words[wordIndex]);
-    }, 200);
-
-    return () => clearInterval(interval);
-  }, [isExtracting, extractionStartTime, url]);
-
-  // Helper to clamp descriptions to 200 chars
-  const getEffectiveInput = (raw: string) => {
-    const trimmed = raw.trim();
-    const detection = detectInputType(trimmed);
-    if (detection.inputType === "description" && trimmed.length > 200) {
-      return trimmed.slice(0, 200);
-    }
-    return trimmed;
-  };
-
-  // Check if input is valid for submission
-  const isInputValid = () => {
-    const effective = getEffectiveInput(url);
-    if (!effective) return false;
-    const validation = validateInput(effective);
-    return validation.isValid;
-  };
-
-  // Classify error types
-  const classifyError = (error: any, response?: Response): { type: string; message: string } => {
-    let errorMessage = "Unknown error";
-
-    if (error) {
-      if (typeof error === "string") {
-        errorMessage = error;
-      } else if (error.message) {
-        errorMessage = error.message;
-      } else if (error.error) {
-        errorMessage = error.error;
-      }
-    }
-
-    // Network-specific errors
-    if (error?.name === "AbortError" || errorMessage.includes("timeout")) {
-      return {
-        type: "TIMEOUT",
-        message: "Site didn't respond. Try again or add details manually.",
-      };
-    }
-
-    if (errorMessage.includes("fetch") || errorMessage.includes("network")) {
-      return {
-        type: "NETWORK",
-        message: "Connection problem. Check your internet and try again.",
-      };
-    }
-
-    // API error responses
-    if (response?.status === 400) {
-      return {
-        type: "VALIDATION",
-        message: errorMessage || "Invalid input. Please check and try again.",
-      };
-    }
-
-    if (response?.status === 404) {
-      return {
-        type: "NOT_FOUND",
-        message: "Site not found. Check the URL or add details manually.",
-      };
-    }
-
-    if (response?.status === 429) {
-      return {
-        type: "RATE_LIMIT",
-        message: "Too many requests. Please wait a moment and try again.",
-      };
-    }
-
-    if (response?.status === 500 || response?.status === 502 || response?.status === 503) {
-      return {
-        type: "SERVER",
-        message: "Problem analyzing site. Try again or add details manually.",
-      };
-    }
-
-    return {
-      type: "GENERIC",
-      message: errorMessage || "Something went wrong. Try again or add details manually.",
-    };
-  };
-
-  // Input validation
-  const handleInputValidation = (input: string) => {
-    const validation = validateInput(input);
-    if (!validation.isValid && validation.error) {
-      setError(validation.error);
-      return false;
-    }
-    setError("");
-    return validation;
-  };
-
-  const handleExtraction = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setError("");
-    setErrorType(null);
-    setIsSuccess(false);
-
-    const effective = getEffectiveInput(url);
-    const validation = handleInputValidation(effective);
-    if (!validation) return;
-
-    // Handle empty input - keep user in modal for manual entry
-    if (validation.inputType === "empty") {
-      return;
-    }
-
-    setIsExtracting(true);
-    const startTime = Date.now();
-    setExtractionStartTime(startTime);
-
-    const isUrl = validation.inputType === "url";
-    const words = isUrl ? urlWords : descriptionWords;
-    setLoadingMessage(words[0]);
-
-    try {
-      let response;
-      if (validation.inputType === "url") {
-        response = await fetch("/api/extract-website", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ url: validation.cleanInput }),
-        });
-      } else {
-        response = await fetch("/api/extract-website", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ description: validation.cleanInput }),
-        });
-      }
-
-      let data;
-      try {
-        data = await response.json();
-      } catch (jsonError) {
-        data = { success: false, error: "Invalid response format" };
-      }
-
-      if (data.success) {
-        const brandDetails: Record<string, unknown> = {
-          name: data.brandName || "",
-          brandDetailsDescription: data.brandDetailsDescription,
-          audience: data.audience || "",
-          websiteUrl: data.url || "",
-          englishVariant: "american",
-          formalityLevel: "Neutral",
-          readingLevel: "6-8",
-        };
-        if (Array.isArray(data.productsServices)) {
-          brandDetails.productsServices = data.productsServices;
-        }
-
-        if (data.keywords) {
-          const keywordsArray = Array.isArray(data.keywords)
-            ? data.keywords
-            : String(data.keywords)
-                .split(/\r?\n|,/)
-                .map((k: string) => k.trim())
-                .filter(Boolean);
-
-          brandDetails.keywords = keywordsArray;
-
-          try {
-            const kw = keywordsArray.join("\n");
-            localStorage.setItem("brandKeywords", kw);
-          } catch {
-            // ignore storage errors
-          }
-        }
-
-        if (Array.isArray(data.suggestedTraits)) {
-          try {
-            localStorage.setItem("suggestedTraits", JSON.stringify(data.suggestedTraits));
-            const autoSelectedTraits = data.suggestedTraits.slice(0, 3);
-            if (autoSelectedTraits.length > 0) {
-              localStorage.setItem("selectedTraits", JSON.stringify(autoSelectedTraits));
-            }
-          } catch {
-            // ignore storage errors
-          }
-        }
-
-        localStorage.setItem("brandDetails", JSON.stringify(brandDetails));
-
-        // Show success state briefly
-        setIsSuccess(true);
-        setIsExtracting(false);
-        setLoadingMessage("");
-        setExtractionStartTime(null);
-
-        // Close modal and redirect after short delay
-        setTimeout(() => {
-          onOpenChange(false);
-          router.push("/guide?generate=preview");
-        }, 800);
-      } else {
-        // Show error
-        const { type, message } = classifyError(data || {}, response);
-        setError(message);
-        setErrorType(type);
-
-        setIsExtracting(false);
-        setIsSuccess(false);
-        setLoadingMessage("");
-        setExtractionStartTime(null);
-      }
-    } catch (error) {
-      const { type, message } = classifyError(error);
-      setError(message);
-      setErrorType(type);
-
-      setIsExtracting(false);
-      setIsSuccess(false);
-      setLoadingMessage("");
-      setExtractionStartTime(null);
-    }
-  };
 
   return (
     <Dialog open={open} onOpenChange={(newOpen) => {
@@ -332,10 +102,7 @@ export function CreateGuideModal({ open, onOpenChange }: CreateGuideModalProps) 
                 onChange={(e) => {
                   const sanitizedValue = sanitizeInput(e.target.value, url);
                   setUrl(sanitizedValue);
-                  if (error) {
-                    setError("");
-                    setErrorType(null);
-                  }
+                  if (error) clearError();
                 }}
                 autoCapitalize="none"
                 autoCorrect="off"

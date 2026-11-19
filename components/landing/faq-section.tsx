@@ -1,5 +1,3 @@
-"use client"
-
 import { FAQ_ITEMS } from "@/lib/landing-data"
 
 export default function FaqSection() {

@@ -1,56 +1,50 @@
 type LogLevel = "debug" | "info" | "warn" | "error"
 
+interface SerializedError {
+  name: string
+  message: string
+  stack?: string
+}
+
 interface LogEntry {
   timestamp: string
   level: LogLevel
   message: string
-  details?: any
-  error?: Error
+  details?: unknown
+  error?: SerializedError
 }
 
-class Logger {
-  private static formatError(error: Error): object {
-    return {
-      message: error.message,
-      name: error.name,
-      stack: error.stack,
-      cause: error.cause,
-    }
-  }
-
-  private static createEntry(level: LogLevel, message: string, details?: any, error?: Error): LogEntry {
-    return {
-      timestamp: new Date().toISOString(),
-      level,
-      message,
-      details,
-      ...(error && { error: this.formatError(error) }),
-    }
-  }
-
-  private static log(entry: LogEntry): void {
-    const logFn = entry.level === "error" || entry.level === "warn" ? console.error : console.log
-    logFn(JSON.stringify(entry, null, 2))
-  }
-
-  static debug(message: string, details?: any): void {
-    // Only show debug logs in development
-    if (process.env.NODE_ENV !== 'production') {
-      this.log(this.createEntry("debug", message, details))
-    }
-  }
-
-  static info(message: string, details?: any): void {
-    this.log(this.createEntry("info", message, details))
-  }
-
-  static warn(message: string, details?: any, error?: Error): void {
-    this.log(this.createEntry("warn", message, details, error))
-  }
-
-  static error(message: string, error?: Error, details?: any): void {
-    this.log(this.createEntry("error", message, details, error))
-  }
+function serializeError(error: unknown): SerializedError {
+  if (error instanceof Error) return { name: error.name, message: error.message, stack: error.stack }
+  return { name: "NonError", message: typeof error === "string" ? error : JSON.stringify(error) ?? String(error) }
 }
 
-export default Logger 
+function write(level: LogLevel, message: string, details?: unknown, error?: unknown): void {
+  const entry: LogEntry = {
+    timestamp: new Date().toISOString(),
+    level,
+    message,
+    ...(details !== undefined && { details }),
+    ...(error !== undefined && { error: serializeError(error) }),
+  }
+  const out = level === "error" || level === "warn" ? console.error : console.log
+  out(JSON.stringify(entry))
+}
+
+/** Structured one-line JSON logs. Never pass emails, prompts or guide content. */
+const Logger = {
+  debug(message: string, details?: unknown): void {
+    if (process.env.NODE_ENV !== "production") write("debug", message, details)
+  },
+  info(message: string, details?: unknown): void {
+    write("info", message, details)
+  },
+  warn(message: string, details?: unknown, error?: unknown): void {
+    write("warn", message, details, error)
+  },
+  error(message: string, error?: unknown, details?: unknown): void {
+    write("error", message, details, error)
+  },
+}
+
+export default Logger

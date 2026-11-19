@@ -1,60 +1,23 @@
-import { createClient, MissingSupabaseConfigError } from "@/lib/supabase-server";
-import { NextResponse } from "next/server";
+import { NextResponse } from "next/server"
+import { requireUser, withRouteErrors } from "@/lib/api-auth"
 
-/** Load a style guide by ID. User must own it. */
+/** Load one of the signed-in user's guides, plus their effective tier. */
 export async function GET(req: Request) {
-  try {
-    const { searchParams } = new URL(req.url);
-    const guideId = searchParams.get("guideId");
+  return withRouteErrors("load-style-guide", async () => {
+    const guideId = new URL(req.url).searchParams.get("guideId")
+    if (!guideId) return NextResponse.json({ error: "Missing guideId" }, { status: 400 })
 
-    if (!guideId) {
-      return NextResponse.json(
-        { error: "Missing guideId" },
-        { status: 400 }
-      );
-    }
+    const auth = await requireUser({ withTier: true })
+    if (!auth.ok) return auth.response
 
-    const supabase = await createClient();
-    const { data, error: authError } = await supabase.auth.getUser();
-    const user = data?.user;
-
-    if (authError || !user) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
-
-    const { data: guide, error } = await supabase
+    const { data: guide } = await auth.supabase
       .from("style_guides")
       .select("id, title, brand_name, content_md, plan_type, brand_details")
       .eq("id", guideId)
-      .eq("user_id", user.id)
-      .single();
+      .eq("user_id", auth.user.id)
+      .maybeSingle()
 
-    if (error || !guide) {
-      return NextResponse.json(
-        { error: "Guide not found or access denied" },
-        { status: 404 }
-      );
-    }
-
-    // Get user's subscription tier
-    const { data: profile } = await supabase
-      .from("profiles")
-      .select("subscription_tier")
-      .eq("id", user.id)
-      .single();
-
-    return NextResponse.json({
-      ...guide,
-      subscription_tier: (profile?.subscription_tier === "free" ? "starter" : profile?.subscription_tier) || "starter"
-    });
-  } catch (e) {
-    if (e instanceof MissingSupabaseConfigError) {
-      return NextResponse.json({ error: "Service unavailable" }, { status: 503 });
-    }
-    console.error("[load-style-guide] Error:", e);
-    return NextResponse.json(
-      { error: "Failed to load guide" },
-      { status: 500 }
-    );
-  }
+    if (!guide) return NextResponse.json({ error: "Guide not found or access denied" }, { status: 404 })
+    return NextResponse.json({ ...guide, subscription_tier: auth.tier })
+  })
 }

@@ -1,44 +1,25 @@
-import { createClient, MissingSupabaseConfigError } from "@/lib/supabase-server";
-import { NextResponse } from "next/server";
+import { NextResponse } from "next/server"
+import { requireUser, withRouteErrors } from "@/lib/api-auth"
+import { canCreateGuide, guideLimit } from "@/lib/tiers"
 
-/** Get current user's guide limit and usage (for upgrade nudge when at limit). */
+/** Current user's effective tier, guide limit and usage (drives the upgrade nudge). */
 export async function GET() {
-  try {
-    const supabase = await createClient();
-    const { data, error: authError } = await supabase.auth.getUser();
-    const user = data?.user;
-
-    if (authError || !user) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
-
-    const { data: profile } = await supabase
-      .from("profiles")
-      .select("subscription_tier")
-      .eq("id", user.id)
-      .single();
-
-    const tier = (profile?.subscription_tier === "free" ? "starter" : profile?.subscription_tier) ?? "starter";
-    const limit = tier === "starter" ? 0 : tier === "pro" ? 2 : 99;
+  return withRouteErrors("user-guide-limit", async () => {
+    const auth = await requireUser({ withTier: true })
+    if (!auth.ok) return auth.response
+    const { supabase, user, tier } = auth
 
     const { count } = await supabase
       .from("style_guides")
-      .select("*", { count: "exact", head: true })
-      .eq("user_id", user.id);
-
-    const used = count ?? 0;
+      .select("id", { count: "exact", head: true })
+      .eq("user_id", user.id)
+    const used = count ?? 0
 
     return NextResponse.json({
       subscription_tier: tier,
-      limit,
+      limit: guideLimit(tier),
       used,
-      atLimit: limit > 0 && used >= limit,
-    });
-  } catch (e) {
-    if (e instanceof MissingSupabaseConfigError) {
-      return NextResponse.json({ error: "Service unavailable" }, { status: 503 });
-    }
-    console.error("[user-guide-limit] Error:", e);
-    return NextResponse.json({ error: "Failed to get limit" }, { status: 500 });
-  }
+      atLimit: !canCreateGuide(tier, used),
+    })
+  })
 }

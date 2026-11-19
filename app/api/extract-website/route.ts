@@ -1,388 +1,181 @@
 import { NextResponse } from "next/server"
-import { generateWithOpenAI, generateAudienceSummary, generateKeywords, generateTraitSuggestions } from "@/lib/openai"
-import Logger from "@/lib/logger"
-import { validateUrl } from "@/lib/url-validation"
-import { scrapeSiteForExtraction, scrapeSiteWithJsonExtraction } from "@/lib/firecrawl-site-scraper"
+import { z } from "zod"
+import {
+  generateAudienceSummary,
+  generateKeywords,
+  generateTraitSuggestions,
+  generateWithOpenAI,
+} from "@/lib/openai"
 import { fetchAndExtractWithCheerio } from "@/lib/cheerio-site-scraper"
+import { normalizeUrlInput, parsePublicHttpUrl } from "@/lib/url-validation"
+import { clientKey } from "@/lib/rate-limit"
+import { checkRateLimit } from "@/lib/rate-limit-durable"
+import { tooManyRequests } from "@/lib/api-auth"
+import { SYSTEM_PROMPT, descriptionPrompt, urlPrompt } from "./prompts"
 
-// Define interfaces for brand details
-interface TargetAudienceDetail {
-  demographic: {
-    age: string
-    occupation: string
-    location: string
+// Anonymous onboarding route: every call costs several LLM requests.
+const RATE_LIMIT = { limit: 10, windowMs: 10 * 60 * 1000 }
+const MAX_DESCRIPTION_CHARS = 2000
+const MAX_URL_CHARS = 2048
+
+type GenerationResult = Awaited<ReturnType<typeof generateWithOpenAI>>
+
+const RequestSchema = z
+  .object({
+    url: z.string().trim().max(MAX_URL_CHARS).optional(),
+    description: z.string().trim().max(MAX_DESCRIPTION_CHARS).optional(),
+  })
+  .refine((b) => Boolean(b.url || b.description), { message: "url or description is required" })
+
+const AudienceObject = z.object({
+  demographic: z
+    .object({ age: z.string().optional(), occupation: z.string().optional(), location: z.string().optional() })
+    .partial()
+    .optional(),
+  interestsValues: z.array(z.string()).optional(),
+  context: z.string().optional(),
+})
+
+const BrandProfileSchema = z.object({
+  name: z.string(),
+  description: z.string(),
+  targetAudience: z.union([z.string(), AudienceObject]).optional().catch(undefined),
+  productsServices: z
+    .array(z.unknown())
+    .optional()
+    .transform((list) => (list ?? []).filter((p): p is string => typeof p === "string")),
+})
+type BrandProfile = z.infer<typeof BrandProfileSchema>
+
+function safeJson(text: string | undefined): unknown {
+  if (!text) return undefined
+  try {
+    return JSON.parse(text)
+  } catch {
+    return undefined
   }
-  interestsValues: string[]
-  context: string
-  needsPainPoints: string
 }
 
-interface BrandDetails {
-  name: string
-  industry: string
-  description: string
-  targetAudience: TargetAudienceDetail | string
+const stringsOnly = (v: unknown): string[] =>
+  Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []
+
+function flattenAudience(audience: BrandProfile["targetAudience"]): string {
+  if (!audience) return ""
+  if (typeof audience === "string") return audience
+  const demo = audience.demographic
+  const demoText = [demo?.occupation, demo?.age && `aged ${demo.age}`, demo?.location && `in ${demo.location}`]
+    .filter(Boolean)
+    .join(" ")
+  const interests = audience.interestsValues?.length ? `interested in ${audience.interestsValues.join(", ")}` : ""
+  return [demoText, interests, audience.context].filter(Boolean).join(" who are ")
 }
 
-interface ProcessedBrandDetails extends Omit<BrandDetails, 'targetAudience'> {
-  targetAudience: string
-  _rawTargetAudience?: TargetAudienceDetail
+function settle(p: Promise<GenerationResult>): Promise<GenerationResult> {
+  return p.catch((e): GenerationResult => ({ success: false, error: e instanceof Error ? e.message : String(e) }))
 }
 
-const REQUIRED_FIELDS = [
-  "name",
-  "industry", 
-  "description",
-  "targetAudience"
-] as const
+/** Generate the main profile; throws if the model fails or returns the wrong shape. */
+async function generateProfile(prompt: string): Promise<BrandProfile> {
+  const result = await generateWithOpenAI(prompt, SYSTEM_PROMPT, "json", 1500, "gpt-5.2", "none")
+  if (!result.success) throw new Error("Brand profile generation failed")
+  const parsed = BrandProfileSchema.safeParse(safeJson(result.content))
+  if (!parsed.success) throw new Error("Brand profile had an unexpected shape")
+  return parsed.data
+}
 
-// Function to flatten target audience object into a string
-function flattenTargetAudience(audience: TargetAudienceDetail): string {
-  const parts = []
-  
-  // Add demographic info
-  if (audience.demographic) {
-    const demo = []
-    if (audience.demographic.occupation) demo.push(audience.demographic.occupation)
-    if (audience.demographic.age) demo.push(`aged ${audience.demographic.age}`)
-    if (audience.demographic.location) demo.push(`in ${audience.demographic.location}`)
-    if (demo.length) parts.push(demo.join(" "))
+/** Audience, keywords and trait suggestions. Each is optional: failures fall back to defaults. */
+async function enrichProfile(profile: BrandProfile) {
+  const name = profile.name || "Brand"
+  const fallbackAudience = flattenAudience(profile.targetAudience) || "general audience"
+
+  const [audienceResult, keywordsResult] = await Promise.all([
+    settle(generateAudienceSummary({ name, brandDetailsDescription: profile.description })),
+    settle(generateKeywords({ name, brandDetailsDescription: profile.description, audience: fallbackAudience })),
+  ])
+  const audience = (audienceResult.success && audienceResult.content?.trim()) || fallbackAudience
+  const keywordsJson = keywordsResult.success ? safeJson(keywordsResult.content) : undefined
+  const keywords = stringsOnly((keywordsJson as { keywords?: unknown } | undefined)?.keywords)
+
+  const traitsResult = await settle(
+    generateTraitSuggestions({ name, brandDetailsDescription: profile.description, audience }),
+  )
+  const suggestedTraits = traitsResult.success ? stringsOnly(safeJson(traitsResult.content)) : []
+
+  return {
+    success: true as const,
+    brandName: profile.name,
+    brandDetailsDescription: profile.description,
+    audience,
+    keywords,
+    suggestedTraits,
+    productsServices: profile.productsServices,
   }
+}
 
-  // Add interests and values
-  if (audience.interestsValues?.length) {
-    parts.push(`interested in ${audience.interestsValues.join(", ")}`)
+async function scrapeHomepage(url: URL): Promise<string> {
+  try {
+    const text = await fetchAndExtractWithCheerio(url.href)
+    return text.length > 100 ? text : ""
+  } catch (e) {
+    console.warn("[extract-website] Homepage scrape failed, using model knowledge:", e instanceof Error ? e.name : "error")
+    return ""
   }
+}
 
-  // Add context if available
-  if (audience.context) {
-    parts.push(audience.context)
-  }
-
-  return parts.join(" who are ")
+function badRequest(message: string) {
+  return NextResponse.json({ success: false, message, error: "Invalid request" }, { status: 400 })
 }
 
 export async function POST(request: Request) {
-  Logger.info("Received extract website request")
+  const limited = await checkRateLimit(`extract-website:${clientKey(request)}`, RATE_LIMIT)
+  if (!limited.ok) return tooManyRequests(limited.retryAfterSeconds)
+
+  let raw: unknown
+  try {
+    raw = await request.json()
+  } catch {
+    return badRequest("Request body must be JSON.")
+  }
+  const input = RequestSchema.safeParse(raw)
+  if (!input.success) {
+    return badRequest(
+      `Enter a website URL (up to ${MAX_URL_CHARS} characters) or a description (up to ${MAX_DESCRIPTION_CHARS} characters).`,
+    )
+  }
+
+  // URL wins when both are sent, as before.
+  if (input.data.url) {
+    let url: URL
+    try {
+      url = parsePublicHttpUrl(normalizeUrlInput(input.data.url))
+    } catch {
+      return badRequest("Invalid URL provided. Please check for typos or extra punctuation.")
+    }
+    try {
+      const homepage = await scrapeHomepage(url)
+      const profile = await generateProfile(urlPrompt(url, homepage))
+      return NextResponse.json({ ...(await enrichProfile(profile)), url: url.href })
+    } catch (e) {
+      console.error("[extract-website] URL extraction failed:", e)
+      return NextResponse.json(
+        { success: false, message: "Failed to extract brand information", error: "Extraction failed" },
+        { status: 500 },
+      )
+    }
+  }
 
   try {
-    // Parse request body
-    const body = await request.json()
-    Logger.debug("Request body", { body })
-
-    // Check if we have either URL or description
-    if (!body.url && !body.description) {
-      Logger.error("Missing URL or description in request")
-      return NextResponse.json(
-        {
-          success: false,
-          message: "URL or description is required",
-          error: "Missing required field: url or description",
-        },
-        { status: 400 }
-      )
-    }
-
-    // If description provided, generate brand details directly from description
-    if (body.description && !body.url) {
-      Logger.info("Processing description input", { descriptionLength: body.description.length })
-      
-      const prompt = `Create a brand profile from this description: "${body.description}"
-
-- Brand Name: Memorable, phonetic, easy to pronounce. 1-2 words ideally. No generic words like "Solutions" or "Services".
-
-- Description: 3 short paragraphs, 80-150 words total. First person (we/our). Compelling and inspiring, not flat.
-  - Start with the brand name (e.g. At Stripe..., Spotify is..., Notion started out...).
-  - This goes at the top of a tone of voice document that marketers and content people will proudly share with their team.
-  - What they do and why it matters.
-  - Who they do it for.
-  - Write like employees would be proud of it, not a product spec or press release.
-  - Do not use em dashes (—); rewrite the sentence instead.
-
-- Output: JSON with {"name", "industry", "description", "targetAudience", "productsServices": [...]}`
-
-      try {
-        const result = await generateWithOpenAI(prompt, `You write compelling brand descriptions that open tone of voice guidelines. For well-known brands, use your knowledge to capture what they're actually known for. For less-known brands, use what you're given and frame it with confidence. Write from the brand's perspective (we/our) in a way employees would be proud of. The description goes at the top of a tone of voice doc that marketers and content people will share proudly with their team. Never use em dashes (—); rewrite the sentence instead.`, "json", 1500, "gpt-5.2", "none")
-        
-        if (result.success && result.content) {
-          const brandDetails = JSON.parse(result.content)
-          
-          
-          // Run audience generation and domain terms extraction in parallel
-          // TODO: Consider consolidating into single AI call for 20-25% performance improvement
-          // (eliminates network overhead, reduces token usage, better context sharing)
-          
-          // TEMPORARILY DISABLED: Audience generation for performance testing
-          // const [audienceResult, keywordsResult] = await Promise.all([
-          //   generateAudienceSummary({ 
-          //     name: brandDetails.name, 
-          //     description: brandDetails.description 
-          //   }).catch(err => ({ success: false, error: err.message })),
-          //   
-          //   generateKeywords({ 
-          //     name: brandDetails.name, 
-          //     description: brandDetails.description,
-          //     audience: audienceStr 
-          //   }).catch(err => ({ success: false, error: err.message }))
-          // ])
-
-          // Get fallback audience from brand details
-          let fallbackAudience = 'general audience'
-          try {
-            if (typeof brandDetails.targetAudience === 'string') {
-              fallbackAudience = brandDetails.targetAudience
-            } else if (brandDetails.targetAudience) {
-              fallbackAudience = flattenTargetAudience(brandDetails.targetAudience)
-            }
-          } catch {}
-
-          // Generate audience and keywords in parallel
-          const [audienceResult, keywordsResult] = await Promise.all([
-            generateAudienceSummary({
-              name: brandDetails.name,
-              brandDetailsDescription: brandDetails.description
-            }).catch(err => ({ success: false, error: err.message })),
-            generateKeywords({
-              name: brandDetails.name,
-              brandDetailsDescription: brandDetails.description,
-              audience: fallbackAudience
-            }).catch(err => ({ success: false, error: err.message }))
-          ])
-
-          // Process audience with error handling
-          let audienceStr = ''
-          if (audienceResult?.success && audienceResult?.content) {
-            audienceStr = audienceResult.content.trim()
-          } else {
-            audienceStr = fallbackAudience
-          }
-          
-          // Process keywords with error handling (return array for consistency)
-          let keywords: string[] = []
-          if (keywordsResult?.success && keywordsResult?.content) {
-            const parsed = JSON.parse(keywordsResult.content)
-            keywords = Array.isArray(parsed.keywords) ? parsed.keywords : []
-          }
-
-          // Generate trait suggestions
-          Logger.info("About to generate trait suggestions...")
-          let suggestedTraits: string[] = []
-          try {
-            Logger.info("Generating trait suggestions for:", { brandName: brandDetails.name, audience: audienceStr })
-            const traitsResult = await generateTraitSuggestions({
-              name: brandDetails.name,
-              brandDetailsDescription: brandDetails.description || brandDetails.brandDetailsDescription,
-              audience: audienceStr
-            })
-            
-            Logger.info("Trait suggestions result:", { success: traitsResult.success, content: traitsResult.content })
-            
-            if (traitsResult.success && traitsResult.content) {
-              const parsed = JSON.parse(traitsResult.content)
-              suggestedTraits = Array.isArray(parsed) ? parsed : []
-              Logger.info("Parsed suggested traits:", suggestedTraits)
-            }
-          } catch (error) {
-            Logger.error("Failed to generate trait suggestions:", error)
-          }
-
-          const productsServices = Array.isArray(brandDetails.productsServices)
-            ? (brandDetails.productsServices as string[]).filter((p) => typeof p === "string")
-            : []
-
-          Logger.info("Successfully generated brand details from description")
-          
-          return NextResponse.json({
-            success: true,
-            brandName: brandDetails.name,
-            brandDetailsDescription: brandDetails.description,
-            audience: audienceStr,
-            keywords,
-            suggestedTraits,
-            productsServices,
-          })
-        } else {
-          throw new Error("Failed to generate brand details")
-        }
-      } catch (error) {
-        Logger.error("Error processing description", error)
-        return NextResponse.json({
-          success: false,
-          message: "Could not process description. Try again or add details manually.",
-          error: "Description processing failed"
-        }, { status: 500 })
-      }
-    }
-
-    // Sanitize and validate the URL
-    let cleanUrl = body.url.trim().replace(/^['"\s]+|['"\s]+$/g, "")
-    if (!/^https?:\/\//i.test(cleanUrl)) {
-      cleanUrl = "https://" + cleanUrl
-    }
-    // Validate again after cleaning
-    const urlValidation = validateUrl(cleanUrl)
-    if (!urlValidation.isValid) {
-      Logger.error("Invalid URL provided after cleaning", new Error(urlValidation.error))
-      return NextResponse.json(
-        {
-          success: false,
-          message: "Invalid URL provided. Please check for typos or extra punctuation.",
-          error: urlValidation.error,
-        },
-        { status: 400 }
-      )
-    }
-
-    // Extract domain/brand name from URL
-    let domain = ""
-    try {
-      const urlObj = new URL(urlValidation.url)
-      domain = urlObj.hostname.replace('www.', '').split('.')[0]
-    } catch {
-      domain = urlValidation.url
-    }
-
-    Logger.info("Extracting brand information", { domain })
-
-    // Try to scrape homepage for context
-    let homepageContext = ""
-    try {
-      const homepage = await fetchAndExtractWithCheerio(urlValidation.url)
-      if (homepage && homepage.length > 100) {
-        homepageContext = `\n\nWebsite homepage:\n${homepage.slice(0, 1500)}`
-        Logger.debug("Homepage context retrieved", { length: homepageContext.length })
-      }
-    } catch (e) {
-      Logger.warn("Could not scrape homepage, will rely on model knowledge", {
-        error: e instanceof Error ? e.message : String(e)
-      })
-    }
-
-    // Simple prompt that leverages the model's knowledge of the brand + optional homepage context
-    const prompt = `Write a brand description for ${domain} (${urlValidation.url})${homepageContext}
-
-Use your knowledge of this brand to write an authentic, compelling description that opens their tone of voice guidelines. If homepage content is provided, use it to ground your answer.
-
-- Brand Name: 1-3 words
-
-- Description: 3 short paragraphs, 80-150 words total. First person (we/our). Slightly inspiring, not flat.
-  - Start with the brand name (e.g. At Stripe..., Spotify is..., Notion started out...).
-  - This goes at the top of a tone of voice document that marketers and content people will proudly share with their team.
-  - What they do and why it matters.
-  - Who they do it for.
-  - Write like employees would be proud of it, not a product spec or press release.
-  - Do not use em dashes (—); rewrite the sentence instead.
-
-- Output: JSON with {"name", "industry", "description", "targetAudience", "productsServices": [...]}`
-
-    const result = await generateWithOpenAI(
-      prompt,
-      `You write compelling brand descriptions that open tone of voice guidelines. For well-known brands, use your knowledge to capture what they're actually known for. For less-known brands, use what you're given and frame it with confidence. Write from the brand's perspective (we/our) in a way employees would be proud of. The description goes at the top of a tone of voice doc that marketers and content people will share proudly with their team. Never use em dashes (—); rewrite the sentence instead.`,
-      "json",
-      1500,
-      "gpt-5.2",
-      "none"
-    )
-
-    if (!result.success || !result.content) {
-      throw new Error(result.error || "Failed to extract brand information")
-    }
-
-    // Parse the JSON response
-    const parsed = JSON.parse(result.content)
-    const brandName = parsed.name || ""
-    const brandDetailsDescription = parsed.description || ""
-    const productsServices = Array.isArray(parsed.productsServices)
-      ? (parsed.productsServices as string[]).filter((p) => typeof p === "string")
-      : []
-
-    Logger.debug("Generated brand details", { brandName, brandDetailsDescription })
-
-    // Generate audience and keywords in parallel
-    // TODO: Consider consolidating into single AI call for 20-25% performance improvement
-    // (eliminates network overhead, reduces token usage, better context sharing)
-    
-    // TEMPORARILY DISABLED: Audience generation for performance testing
-    // const [audienceResult, keywordsResult] = await Promise.all([
-    //   generateAudienceSummary({ 
-    //     name: brandName || 'Brand', 
-    //     description: brandDetailsDescription 
-    //   }).catch(err => ({ success: false, error: err.message })),
-    //   
-    //   generateKeywords({
-
-    // Generate audience and keywords in parallel
-    const [audienceResult, keywordsResult] = await Promise.all([
-      generateAudienceSummary({
-        name: brandName || 'Brand',
-        brandDetailsDescription: brandDetailsDescription
-      }).catch(err => ({ success: false, error: err.message })),
-      generateKeywords({
-        name: brandName || 'Brand',
-        brandDetailsDescription: brandDetailsDescription,
-        audience: 'general audience'
-      }).catch(err => ({ success: false, error: err.message }))
-    ])
-
-    // Process audience with error handling
-    let audience = ''
-    if (audienceResult?.success && audienceResult?.content) {
-      audience = audienceResult.content.trim()
-    }
-
-    // Process keywords with error handling (return array for consistency)
-    let keywords: string[] = []
-    if (keywordsResult?.success && keywordsResult?.content) {
-      const parsed = JSON.parse(keywordsResult.content)
-      keywords = Array.isArray(parsed.keywords) ? parsed.keywords : []
-    }
-
-    // Generate trait suggestions
-    Logger.info("About to generate trait suggestions...")
-    let suggestedTraits: string[] = []
-    try {
-      Logger.info("Generating trait suggestions for:", { brandName, audience })
-      const traitsResult = await generateTraitSuggestions({
-        name: brandName,
-        brandDetailsDescription: brandDetailsDescription,
-        audience: audience
-      })
-      
-      Logger.info("Trait suggestions result:", { success: traitsResult.success, content: traitsResult.content })
-      
-      if (traitsResult.success && traitsResult.content) {
-        const parsed = JSON.parse(traitsResult.content)
-        suggestedTraits = Array.isArray(parsed) ? parsed : []
-        Logger.info("Parsed suggested traits:", suggestedTraits)
-      }
-    } catch (error) {
-      Logger.error("Failed to generate trait suggestions:", error)
-    }
-
-    Logger.info("Successfully extracted brand information")
-    return NextResponse.json({
-      success: true,
-      brandDetailsDescription,
-      brandName,
-      audience,
-      keywords,
-      suggestedTraits,
-      productsServices,
-      ...(urlValidation?.url && { url: urlValidation.url }),
-    })
-  } catch (error) {
-    Logger.error(
-      "Error in extract-website API",
-      error instanceof Error ? error : new Error("Unknown error")
-    )
-
+    const profile = await generateProfile(descriptionPrompt(input.data.description!))
+    return NextResponse.json(await enrichProfile(profile))
+  } catch (e) {
+    console.error("[extract-website] Description processing failed:", e)
     return NextResponse.json(
       {
         success: false,
-        message: "Failed to extract brand information",
-        error: error instanceof Error ? error.message : "Unknown error occurred",
+        message: "Could not process description. Try again or add details manually.",
+        error: "Description processing failed",
       },
-      { status: 500 }
+      { status: 500 },
     )
   }
 }

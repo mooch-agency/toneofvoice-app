@@ -1,7 +1,8 @@
 /**
- * Shared Chrome/Chromium launch options for PDF export (primary and fallback).
+ * Chrome/Chromium launch options and request policy for server-side PDF export.
  * Local dev: uses system Chrome (set CHROME_EXECUTABLE_PATH to override). Vercel: uses @sparticuz/chromium.
  */
+import "server-only"
 import puppeteer from "puppeteer-core"
 import chromium from "@sparticuz/chromium"
 
@@ -40,5 +41,25 @@ export async function getChromeLaunchOptions(): Promise<{
     executablePath,
     args: puppeteer.defaultArgs({ args: chromium.args, headless: "shell" }),
     headless: "shell" as const,
+  }
+}
+
+/** Request body cap for /api/export-pdf (html + css JSON). */
+export const MAX_PDF_BODY_BYTES = 2 * 1024 * 1024
+
+const ALLOWED_FONT_HOSTS = new Set(["fonts.googleapis.com", "fonts.gstatic.com"])
+
+/**
+ * Requests the PDF renderer may make: inline data, the blank page and Google
+ * Fonts over https. Everything else (internal hosts, metadata endpoints, file:)
+ * is aborted, so attacker HTML cannot pull private content into the PDF.
+ */
+export function isAllowedPdfRequest(rawUrl: string): boolean {
+  if (rawUrl === "about:blank" || rawUrl.startsWith("data:")) return true
+  try {
+    const url = new URL(rawUrl)
+    return url.protocol === "https:" && url.port === "" && ALLOWED_FONT_HOSTS.has(url.hostname)
+  } catch {
+    return false
   }
 }

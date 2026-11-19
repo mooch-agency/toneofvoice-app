@@ -1,3 +1,5 @@
+import { extractJson } from "./llm-json"
+
 export type TraitName =
   | "Assertive"
   | "Witty"
@@ -311,4 +313,38 @@ export const TRAITS: Record<TraitName, VoiceTrait> = {
       after: "We've distilled complexity into clarity—just as you would",
     },
   },
-} 
+}
+
+export const TRAIT_NAMES = Object.keys(TRAITS) as TraitName[]
+
+const TRAIT_BY_LOWER = new Map(TRAIT_NAMES.map((name) => [name.toLowerCase(), name]))
+
+/** The predefined trait matching `name` (case-insensitive), or null. */
+export function canonicalTraitName(name: string): TraitName | null {
+  return TRAIT_BY_LOWER.get(name.trim().toLowerCase()) ?? null
+}
+
+/**
+ * Keep only predefined traits from a model suggestion, in canonical case,
+ * without duplicates. Accepts a JSON string, an array or `{ traits: [...] }`.
+ */
+export function parseTraitSuggestions(raw: unknown): TraitName[] {
+  const value = typeof raw === "string" ? extractJson(raw) : raw
+  const list = Array.isArray(value) ? value : (value as { traits?: unknown } | null | undefined)?.traits
+  if (!Array.isArray(list)) return []
+  const out: TraitName[] = []
+  for (const item of list) {
+    const name = typeof item === "string" ? canonicalTraitName(item) : null
+    if (name && !out.includes(name)) out.push(name)
+  }
+  return out
+}
+
+/** Trait names from a mixed list of strings and `{ name }` objects (client storage formats). */
+export function traitNames(traits: unknown): string[] {
+  if (!Array.isArray(traits)) return []
+  return traits
+    .map((t) => (typeof t === "string" ? t : (t as { name?: unknown } | null)?.name))
+    .filter((n): n is string => typeof n === "string" && n.trim().length > 0)
+    .map((n) => n.trim())
+}

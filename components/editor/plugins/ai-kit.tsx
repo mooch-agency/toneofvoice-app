@@ -23,7 +23,6 @@ export const aiChatPlugin = AIChatPlugin.extend({
   options: {
     chatOptions: {
       api: '/api/ai/command',
-      body: {},
     },
     subscriptionTier: 'starter' as 'starter' | 'pro' | 'agency',
   },

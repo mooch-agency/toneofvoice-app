@@ -28,7 +28,7 @@ import { useState, useRef, useEffect } from "react"
 import { Badge } from "@/components/ui/badge"
 import { cn } from "@/lib/utils"
 import { useAuth } from "@/components/AuthProvider"
-import { createClient } from "@/lib/supabase-browser"
+import { isUnlocked as tierUnlocked } from "@/lib/tiers"
 import { useRouter } from "next/navigation"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 
@@ -52,12 +52,12 @@ export function GuideSidebar({
   onAddSection,
 }: GuideSidebarProps) {
   const { setOpenMobile } = useSidebar()
-  const { user } = useAuth()
+  const { user, signOut } = useAuth()
   const router = useRouter()
 
+  // One sign-out path (AuthProvider), which also clears app storage.
   const handleLogout = async () => {
-    const supabase = createClient()
-    await supabase.auth.signOut()
+    await signOut()
     router.push('/')
   }
 
@@ -72,12 +72,7 @@ export function GuideSidebar({
   const totalSections = sections.length
   // unlocked count: sections where minTier is 'starter' OR user tier >= minTier
   // Tier hierarchy: starter < pro < agency
-  const isUnlocked = (minTier?: Tier) => {
-    if (!minTier || minTier === 'starter') return true
-    if (subscriptionTier === 'starter') return false
-    if (subscriptionTier === 'pro' && minTier === 'agency') return false
-    return true
-  }
+  const isUnlocked = (minTier?: Tier) => tierUnlocked(subscriptionTier, minTier)
 
   const unlockedCount = sections.filter(s => isUnlocked(s.minTier)).length
   const progress = Math.round((unlockedCount / Math.max(totalSections, 1)) * 100)

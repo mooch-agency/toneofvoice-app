@@ -32,7 +32,7 @@ export async function createClient() {
             cookieStore.set(name, value, options)
           );
         } catch {
-          // Called from Server Component - ignore; middleware handles refresh
+          // Called from a Server Component - ignore; proxy.ts handles refresh
         }
       },
     },

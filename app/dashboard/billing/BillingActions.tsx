@@ -1,109 +1,199 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Loader2 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
-import { getUserFriendlyError, isAbortError } from "@/lib/api-utils";
+import { isAbortError } from "@/lib/api-utils";
+import { PRICING_TIERS } from "@/lib/landing-data";
 import { MetaPixel } from "@/lib/meta-pixel";
+import { isPaidTier, normalizeTier, type Tier } from "@/lib/tiers";
+
+type Plan = "pro" | "agency";
 
 type Props = {
   hasCustomer: boolean;
+  /** The user's effective tier. */
   tier: string;
-  plan?: "pro" | "agency";
+  plan?: Plan;
   compact?: boolean;
   /** Optional class for the primary CTA (e.g. tier-themed button on billing cards). */
   buttonClass?: string;
 };
 
-export function BillingActions({ hasCustomer, tier, plan, compact, buttonClass }: Props) {
+const TIER_RANK: Record<Tier, number> = { starter: 0, pro: 1, agency: 2 };
+const PLAN_NAME: Record<Plan, string> = { pro: "Pro", agency: "Agency" };
+
+/** Returned when create-subscription-session says the user should upgrade in place. */
+const UPGRADE = "upgrade" as const;
+
+/**
+ * POST to a billing endpoint and follow the Stripe URL it returns. A 409 from
+ * create-subscription-session carries either `manageUrl` (billing portal),
+ * which is followed, or `upgrade: true`, which is returned so the caller can
+ * offer the in-app upgrade. A second subscription is never created.
+ */
+async function goToStripe(endpoint: string, body?: unknown): Promise<typeof UPGRADE | void> {
+  const res = await fetch(endpoint, {
+    method: "POST",
+    headers: body ? { "Content-Type": "application/json" } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (res.status === 401) throw new Error("Your session expired. Please sign in again.");
+  const data = (await res.json().catch(() => ({}))) as {
+    url?: string;
+    manageUrl?: string;
+    upgrade?: boolean;
+    error?: string;
+  };
+  if (res.status === 409 && data.upgrade) return UPGRADE;
+  const target = data.url ?? (res.status === 409 ? data.manageUrl : undefined);
+  if (!target) throw new Error(data.error || "Please try again in a few minutes.");
+  window.location.href = target;
+}
+
+/** Upgrade the existing subscription in place; the server charges the prorated difference. */
+async function changePlan(plan: Plan) {
+  const res = await fetch("/api/change-plan", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ plan }),
+  });
+  if (res.status === 401) throw new Error("Your session expired. Please sign in again.");
+  const data = (await res.json().catch(() => ({}))) as { success?: boolean; error?: string };
+  if (!res.ok || !data.success) throw new Error(data.error || "Please try again in a few minutes.");
+}
+
+function priceLabel(plan: Plan): string | undefined {
+  return PRICING_TIERS.find((t) => t.id === plan)?.priceLabel;
+}
+
+export function BillingActions({ hasCustomer, tier: rawTier, plan, compact, buttonClass }: Props) {
   const [loading, setLoading] = useState(false);
+  const [confirmPlan, setConfirmPlan] = useState<Plan | null>(null);
+  const [upgrading, setUpgrading] = useState(false);
   const { toast } = useToast();
+  const router = useRouter();
+  const tier = normalizeTier(rawTier);
+  const size = compact ? "sm" : "default";
 
-  const handleManage = async () => {
+  const run = async (title: string, action: () => Promise<void>) => {
     setLoading(true);
     try {
-      const res = await fetch("/api/create-portal-session", { method: "POST" });
-      let data: { url?: string; error?: string };
-      try {
-        data = await res.json();
-      } catch {
-        throw new Error(res.status === 401 ? "Your session expired. Please sign in again." : "Invalid response. Please try again.");
-      }
-      if (res.status === 401) throw new Error("Your session expired. Please sign in again.");
-      if (data?.url) window.location.href = data.url;
-      else throw new Error(data?.error || "Failed to open portal");
+      await action();
     } catch (e) {
       setLoading(false);
       if (isAbortError(e)) return;
-      const message = getUserFriendlyError(e) || (e instanceof Error ? e.message : "Could not open billing.");
       toast({
-        title: "Could not open billing",
-        description: `${message} You can try again.`,
+        title,
+        description: e instanceof Error ? e.message : "Please try again in a few minutes.",
         variant: "destructive",
       });
     }
   };
 
-  const handleSubscribe = async (p: "pro" | "agency") => {
-    setLoading(true);
-    // Fire before redirect - Stripe will take over the page next
-    MetaPixel.initiateCheckout(p);
-    try {
-      const res = await fetch("/api/create-subscription-session", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ plan: p }),
-      });
-      let data: { url?: string; error?: string };
-      try {
-        data = await res.json();
-      } catch {
-        throw new Error(res.status === 401 ? "Your session expired. Please sign in again." : "Invalid response. Please try again.");
+  const handleManage = () =>
+    run("Could not open billing", async () => {
+      await goToStripe("/api/create-portal-session");
+    });
+
+  const handleSubscribe = (p: Plan) =>
+    run("Something went wrong", async () => {
+      MetaPixel.initiateCheckout(p);
+      if ((await goToStripe("/api/create-subscription-session", { plan: p })) === UPGRADE) {
+        setLoading(false);
+        setConfirmPlan(p);
       }
-      if (res.status === 401) throw new Error("Your session expired. Please sign in again.");
-      if (data?.url) window.location.href = data.url;
-      else throw new Error(data?.error || "Failed to start checkout");
+    });
+
+  const handleConfirmUpgrade = async () => {
+    if (!confirmPlan) return;
+    setUpgrading(true);
+    try {
+      await changePlan(confirmPlan);
+      setConfirmPlan(null);
+      toast({ title: `You're on ${PLAN_NAME[confirmPlan]} now`, description: "Your plan was upgraded." });
+      router.refresh();
     } catch (e) {
-      setLoading(false);
-      if (isAbortError(e)) return;
       toast({
-        title: "Something went wrong",
-        description: "Please try again in a few minutes.",
+        title: "Upgrade failed",
+        description: e instanceof Error && !isAbortError(e) ? e.message : "Please try again in a few minutes.",
         variant: "destructive",
       });
+    } finally {
+      setUpgrading(false);
     }
   };
+
+  const spinner = <Loader2 className="h-4 w-4 animate-spin" />;
+
+  const confirmDialog = confirmPlan && (
+    <Dialog open onOpenChange={(open) => !open && !upgrading && setConfirmPlan(null)}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Upgrade to {PLAN_NAME[confirmPlan]}?</DialogTitle>
+          <DialogDescription>
+            Your current subscription switches to {PLAN_NAME[confirmPlan]} right away. We&apos;ll charge the
+            prorated difference for the rest of this billing period to your card on file today
+            {priceLabel(confirmPlan) ? `, then ${priceLabel(confirmPlan)}/month from your next billing date` : ""}.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter className="gap-2 sm:gap-0">
+          <Button variant="outline" onClick={() => setConfirmPlan(null)} disabled={upgrading}>
+            Cancel
+          </Button>
+          <Button onClick={handleConfirmUpgrade} disabled={upgrading}>
+            {upgrading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+            Confirm upgrade
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
 
   // Main billing section: Manage in Stripe
-  if (!plan && hasCustomer && (tier === "starter" || tier === "pro" || tier === "agency")) {
-    return (
-      <Button onClick={handleManage} disabled={loading} size={compact ? "sm" : "default"} className={buttonClass}>
-        {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : "Manage in Stripe"}
+  if (!plan) {
+    return hasCustomer ? (
+      <Button onClick={handleManage} disabled={loading} size={size} className={buttonClass}>
+        {loading ? spinner : "Manage in Stripe"}
       </Button>
-    );
+    ) : null;
   }
 
-  // Plan cards
-  if (plan) {
-    if (tier === plan) {
-      return hasCustomer ? (
-        <Button onClick={handleManage} disabled={loading} size={compact ? "sm" : "default"} variant="outline" className={compact ? undefined : buttonClass}>
-          {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : "Manage"}
-        </Button>
-      ) : null;
-    }
-    // Can subscribe/upgrade: starter -> pro/agency; pro -> agency
-    const canUpgrade = (tier === "starter" && (plan === "pro" || plan === "agency")) || (tier === "pro" && plan === "agency");
-    if (canUpgrade) {
-      const buttonLabel = plan === "pro" ? "Get Pro" : "Get Agency";
-      return (
-        <Button onClick={() => handleSubscribe(plan)} disabled={loading} size={compact ? "sm" : "default"} className={buttonClass}>
-          {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : buttonLabel}
-        </Button>
-      );
-    }
+  if (tier === plan) {
+    return hasCustomer ? (
+      <Button onClick={handleManage} disabled={loading} size={size} variant="outline" className={compact ? undefined : buttonClass}>
+        {loading ? spinner : "Manage"}
+      </Button>
+    ) : null;
   }
 
-  return null;
+  // Downgrades are done under Manage (billing portal).
+  if (TIER_RANK[plan] <= TIER_RANK[tier]) return null;
+
+  // Paying customers upgrade their existing subscription in-app (prorated, same subscription).
+  const upgradeInApp = isPaidTier(tier) && hasCustomer;
+  const label = plan === "pro" ? "Get Pro" : upgradeInApp ? "Upgrade to Agency" : "Get Agency";
+  return (
+    <>
+      <Button
+        onClick={upgradeInApp ? () => setConfirmPlan(plan) : () => handleSubscribe(plan)}
+        disabled={loading || upgrading}
+        size={size}
+        className={buttonClass}
+      >
+        {loading ? spinner : label}
+      </Button>
+      {confirmDialog}
+    </>
+  );
 }
