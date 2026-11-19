@@ -14,7 +14,6 @@ export function MixpanelProvider({ children }: MixpanelProviderProps) {
 
     // Skip in development to avoid polluting analytics
     if (process.env.NODE_ENV === "development") {
-      console.log("[Mixpanel] Skipping initialization in development mode")
       return
     }
 
@@ -35,18 +34,10 @@ export function MixpanelProvider({ children }: MixpanelProviderProps) {
       record_heatmap_data: true,
       // Discard replays shorter than 8s - removes low-signal bounces at SDK level
       record_min_ms: 8000,
-      // Show all text and inputs in replays - mask only password/email/tel fields
-      // (those are always masked by Mixpanel regardless of this setting)
-      record_mask_all_text: false,
-      record_mask_all_inputs: false,
-    })
-
-    // Debug: log actual runtime config to confirm masking settings are applied
-    console.log("[Mixpanel] Config check:", {
-      record_mask_all_text: mixpanel.get_config("record_mask_all_text"),
-      record_mask_all_inputs: mixpanel.get_config("record_mask_all_inputs"),
-      record_sessions_percent: mixpanel.get_config("record_sessions_percent"),
-      api_host: mixpanel.get_config("api_host"),
+      // Mask all text and inputs: replays must not capture brand descriptions,
+      // guide content or names typed into forms
+      record_mask_all_text: true,
+      record_mask_all_inputs: true,
     })
 
     // If this browser was previously flagged as an internal user, suppress all tracking.

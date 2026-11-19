@@ -11,12 +11,14 @@ import { Button } from "@/components/ui/button";
 import { AuthError } from "@/components/ui/auth-error";
 import { classifyAuthError } from "@/lib/auth-errors";
 import { MetaPixel } from "@/lib/meta-pixel";
+import { safeRedirectPath } from "@/lib/safe-redirect";
+import { validatePassword } from "@/lib/password";
 
 function SignUpContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   // Route through /auth/claim so pending localStorage guides get saved before dashboard renders
-  const redirectTo = searchParams.get("redirectTo") ?? "/auth/claim";
+  const redirectTo = safeRedirectPath(searchParams.get("redirectTo"), "/auth/claim");
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -37,8 +39,9 @@ function SignUpContent() {
       setError("Please enter a valid email address.");
       return;
     }
-    if (password.length < 8) {
-      setError("Password must be at least 8 characters long.");
+    const passwordError = validatePassword(password);
+    if (passwordError) {
+      setError(passwordError);
       return;
     }
     setError("");
@@ -166,6 +169,8 @@ function SignUpContent() {
           <div className="relative">
             <User className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
             <input
+              aria-label="Full name"
+              autoComplete="name"
               placeholder="Full name"
               type="text"
               value={name}
@@ -176,6 +181,8 @@ function SignUpContent() {
           <div className="relative">
             <Mail className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
             <input
+              aria-label="Email"
+              autoComplete="email"
               placeholder="Email"
               type="email"
               value={email}
@@ -187,6 +194,8 @@ function SignUpContent() {
           <div className="relative">
             <Lock className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
             <input
+              aria-label="Password"
+              autoComplete="new-password"
               placeholder="Password (min 8 characters)"
               type="password"
               value={password}

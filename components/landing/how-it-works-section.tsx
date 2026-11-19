@@ -1,5 +1,3 @@
-"use client"
-
 import { HOW_IT_WORKS_STEPS } from "@/lib/landing-data"
 import { ArrowRight } from "lucide-react"
 

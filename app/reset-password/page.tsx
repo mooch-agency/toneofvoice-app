@@ -7,6 +7,7 @@ import Link from "next/link";
 import { Lock, CheckCircle2 } from "lucide-react";
 import { createClient } from "@/lib/supabase-browser";
 import { classifyAuthError } from "@/lib/auth-errors";
+import { validatePassword } from "@/lib/password";
 import { Button } from "@/components/ui/button";
 import { AuthError } from "@/components/ui/auth-error";
 
@@ -42,8 +43,9 @@ export default function ResetPasswordPage() {
       return;
     }
 
-    if (password.length < 6) {
-      setError("Password must be at least 6 characters long.");
+    const passwordError = validatePassword(password);
+    if (passwordError) {
+      setError(passwordError);
       return;
     }
 
@@ -130,6 +132,8 @@ export default function ResetPasswordPage() {
           <div className="relative">
             <Lock className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
             <input
+              aria-label="New password"
+              autoComplete="new-password"
               placeholder="New password"
               type="password"
               value={password}
@@ -142,6 +146,8 @@ export default function ResetPasswordPage() {
           <div className="relative">
             <Lock className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
             <input
+              aria-label="Confirm new password"
+              autoComplete="new-password"
               placeholder="Confirm new password"
               type="password"
               value={confirmPassword}

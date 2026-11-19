@@ -1,5 +1,3 @@
-import Logger from "./logger"
-
 export interface InputDetectionResult {
   isUrl: boolean
   cleanInput: string
@@ -29,23 +27,12 @@ export function detectInputType(input: string): InputDetectionResult {
     }
   }
 
-  // URL patterns to check for
-  const urlPatterns = [
-    /^https?:\/\//i,                    // Starts with http:// or https://
-    /\.[a-z]{2,}([\/\?]|$)/i,          // Contains domain extension (.com, .org, etc.)
-    /^[a-zA-Z0-9-]+\.[a-zA-Z]{2,}/,    // Basic domain pattern (example.com)
-    /^www\./i,                         // Starts with www.
-    /^localhost$/i                     // localhost (treat as URL for proper validation)
-  ]
-
-  const isUrl = urlPatterns.some(pattern => pattern.test(cleanInput))
-  
-  Logger.debug("Input type detection", { 
-    input, 
-    cleanInput, 
-    isUrl,
-    inputType: isUrl ? 'url' : 'description'
-  })
+  // Only whitespace-free input can be a URL; anything with spaces is a description.
+  const isUrl =
+    !/\s/.test(cleanInput) &&
+    (/^https?:\/\//i.test(cleanInput) ||
+      /^[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,}([\/?#:]|$)/i.test(cleanInput) ||
+      /^localhost$/i.test(cleanInput))
 
   return {
     isUrl,
@@ -101,16 +88,13 @@ export function validateInput(input: string): InputValidationResult {
         throw new Error("Invalid domain format")
       }
 
-      Logger.info("URL validation successful", { url: url.toString() })
-      
       return {
         isValid: true,
         cleanInput: url.toString(),
         inputType: 'url'
       }
 
-    } catch (error) {
-      Logger.error("URL validation failed", error instanceof Error ? error : new Error("Unknown error"))
+    } catch {
       
       return {
         isValid: false,
@@ -142,10 +126,6 @@ export function validateInput(input: string): InputValidationResult {
         error: "Description too long. Keep under 200 characters"
       }
     }
-
-    Logger.info("Description validation successful", { 
-      length: detection.cleanInput.length 
-    })
 
     return {
       isValid: true,
