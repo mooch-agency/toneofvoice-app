@@ -2,7 +2,6 @@ import { NextResponse } from "next/server"
 import { generateWithOpenAI, generateAudienceSummary, generateKeywords, generateTraitSuggestions } from "@/lib/openai"
 import Logger from "@/lib/logger"
 import { validateUrl } from "@/lib/url-validation"
-import { scrapeSiteForExtraction, scrapeSiteWithJsonExtraction } from "@/lib/firecrawl-site-scraper"
 import { fetchAndExtractWithCheerio } from "@/lib/cheerio-site-scraper"
 
 // Define interfaces for brand details

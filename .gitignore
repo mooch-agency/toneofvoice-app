@@ -43,3 +43,6 @@ next-env.d.ts
 # Claude Code settings
 .claude/settings.local.json
 .mcp.json
+
+# but keep the documented template
+!.env.example

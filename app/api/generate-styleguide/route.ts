@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server"
 import { renderStyleGuideTemplate, renderFullGuideFromPreview } from "@/lib/template-processor"
-import { captureServerError } from "@/lib/posthog"
 
 // Simplified validation function - only new format
 function validateBrandDetails(details: any) {
