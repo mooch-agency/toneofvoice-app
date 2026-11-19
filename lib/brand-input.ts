@@ -75,6 +75,21 @@ export function parseBrandDetails(input: unknown): ParseResult<BrandDetails> {
   return result.success ? { ok: true, data: result.data } : { ok: false, error: firstError(result.error) }
 }
 
+export type JsonBodyResult = { ok: true; body: unknown } | { ok: false; status: 400 | 413; error: string }
+
+/** Read a JSON request body, rejecting bodies over `maxBytes` (413) and invalid JSON (400). */
+export async function readJsonBody(req: Request, maxBytes: number): Promise<JsonBodyResult> {
+  const tooLarge = { ok: false, status: 413, error: "Request body is too large" } as const
+  if (Number(req.headers.get("content-length") ?? 0) > maxBytes) return tooLarge
+  const text = await req.text()
+  if (new TextEncoder().encode(text).length > maxBytes) return tooLarge
+  try {
+    return { ok: true, body: JSON.parse(text) }
+  } catch {
+    return { ok: false, status: 400, error: "Invalid JSON body" }
+  }
+}
+
 const PreviewBody = z.object({
   brandDetails: z.record(z.string(), z.unknown(), { error: "Brand details are required" }),
   selectedTraits: Traits.optional(),

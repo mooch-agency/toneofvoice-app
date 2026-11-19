@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest"
-import { BrandDetailsInput, parseBrandDetails, parsePreviewRequest } from "./brand-input"
+import { BrandDetailsInput, parseBrandDetails, parsePreviewRequest, readJsonBody } from "./brand-input"
 
 const valid = {
   name: "Acme",
@@ -93,6 +93,24 @@ describe("parseBrandDetails", () => {
   it("rejects non-objects", () => {
     expect(parseBrandDetails(null).ok).toBe(false)
     expect(parseBrandDetails("x").ok).toBe(false)
+  })
+})
+
+describe("readJsonBody", () => {
+  const req = (body: string, headers: Record<string, string> = {}) =>
+    new Request("http://x", { method: "POST", body, headers })
+
+  it("parses a JSON body", async () => {
+    expect(await readJsonBody(req('{"a":1}'), 100)).toEqual({ ok: true, body: { a: 1 } })
+  })
+
+  it("returns 400 for invalid JSON", async () => {
+    expect(await readJsonBody(req("{bad"), 100)).toMatchObject({ ok: false, status: 400 })
+  })
+
+  it("returns 413 for oversized bodies, by header or by actual size", async () => {
+    expect(await readJsonBody(req("{}", { "content-length": "5000" }), 100)).toMatchObject({ ok: false, status: 413 })
+    expect(await readJsonBody(req(JSON.stringify({ a: "x".repeat(200) })), 100)).toMatchObject({ ok: false, status: 413 })
   })
 })
 
