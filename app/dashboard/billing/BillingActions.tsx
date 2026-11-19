@@ -4,106 +4,103 @@ import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Loader2 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
-import { getUserFriendlyError, isAbortError } from "@/lib/api-utils";
+import { isAbortError } from "@/lib/api-utils";
 import { MetaPixel } from "@/lib/meta-pixel";
+import { isPaidTier, normalizeTier, type Tier } from "@/lib/tiers";
+
+type Plan = "pro" | "agency";
 
 type Props = {
   hasCustomer: boolean;
+  /** The user's effective tier. */
   tier: string;
-  plan?: "pro" | "agency";
+  plan?: Plan;
   compact?: boolean;
   /** Optional class for the primary CTA (e.g. tier-themed button on billing cards). */
   buttonClass?: string;
 };
 
-export function BillingActions({ hasCustomer, tier, plan, compact, buttonClass }: Props) {
+const TIER_RANK: Record<Tier, number> = { starter: 0, pro: 1, agency: 2 };
+
+/**
+ * POST to a billing endpoint and follow the Stripe URL it returns. A 409 from
+ * create-subscription-session carries `manageUrl` (billing portal), which is
+ * followed too, so a second subscription is never created.
+ */
+async function goToStripe(endpoint: string, body?: unknown) {
+  const res = await fetch(endpoint, {
+    method: "POST",
+    headers: body ? { "Content-Type": "application/json" } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (res.status === 401) throw new Error("Your session expired. Please sign in again.");
+  const data = (await res.json().catch(() => ({}))) as { url?: string; manageUrl?: string; error?: string };
+  const target = data.url ?? (res.status === 409 ? data.manageUrl : undefined);
+  if (!target) throw new Error(data.error || "Please try again in a few minutes.");
+  window.location.href = target;
+}
+
+export function BillingActions({ hasCustomer, tier: rawTier, plan, compact, buttonClass }: Props) {
   const [loading, setLoading] = useState(false);
   const { toast } = useToast();
+  const tier = normalizeTier(rawTier);
+  const size = compact ? "sm" : "default";
 
-  const handleManage = async () => {
+  const run = async (title: string, action: () => Promise<void>) => {
     setLoading(true);
     try {
-      const res = await fetch("/api/create-portal-session", { method: "POST" });
-      let data: { url?: string; error?: string };
-      try {
-        data = await res.json();
-      } catch {
-        throw new Error(res.status === 401 ? "Your session expired. Please sign in again." : "Invalid response. Please try again.");
-      }
-      if (res.status === 401) throw new Error("Your session expired. Please sign in again.");
-      if (data?.url) window.location.href = data.url;
-      else throw new Error(data?.error || "Failed to open portal");
+      await action();
     } catch (e) {
       setLoading(false);
       if (isAbortError(e)) return;
-      const message = getUserFriendlyError(e) || (e instanceof Error ? e.message : "Could not open billing.");
       toast({
-        title: "Could not open billing",
-        description: `${message} You can try again.`,
+        title,
+        description: e instanceof Error ? e.message : "Please try again in a few minutes.",
         variant: "destructive",
       });
     }
   };
 
-  const handleSubscribe = async (p: "pro" | "agency") => {
-    setLoading(true);
-    // Fire before redirect - Stripe will take over the page next
-    MetaPixel.initiateCheckout(p);
-    try {
-      const res = await fetch("/api/create-subscription-session", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ plan: p }),
-      });
-      let data: { url?: string; error?: string };
-      try {
-        data = await res.json();
-      } catch {
-        throw new Error(res.status === 401 ? "Your session expired. Please sign in again." : "Invalid response. Please try again.");
-      }
-      if (res.status === 401) throw new Error("Your session expired. Please sign in again.");
-      if (data?.url) window.location.href = data.url;
-      else throw new Error(data?.error || "Failed to start checkout");
-    } catch (e) {
-      setLoading(false);
-      if (isAbortError(e)) return;
-      toast({
-        title: "Something went wrong",
-        description: "Please try again in a few minutes.",
-        variant: "destructive",
-      });
-    }
-  };
+  const handleManage = () => run("Could not open billing", () => goToStripe("/api/create-portal-session"));
+
+  const handleSubscribe = (p: Plan) =>
+    run("Something went wrong", async () => {
+      MetaPixel.initiateCheckout(p);
+      await goToStripe("/api/create-subscription-session", { plan: p });
+    });
+
+  const spinner = <Loader2 className="h-4 w-4 animate-spin" />;
 
   // Main billing section: Manage in Stripe
-  if (!plan && hasCustomer && (tier === "starter" || tier === "pro" || tier === "agency")) {
-    return (
-      <Button onClick={handleManage} disabled={loading} size={compact ? "sm" : "default"} className={buttonClass}>
-        {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : "Manage in Stripe"}
+  if (!plan) {
+    return hasCustomer ? (
+      <Button onClick={handleManage} disabled={loading} size={size} className={buttonClass}>
+        {loading ? spinner : "Manage in Stripe"}
       </Button>
-    );
+    ) : null;
   }
 
-  // Plan cards
-  if (plan) {
-    if (tier === plan) {
-      return hasCustomer ? (
-        <Button onClick={handleManage} disabled={loading} size={compact ? "sm" : "default"} variant="outline" className={compact ? undefined : buttonClass}>
-          {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : "Manage"}
-        </Button>
-      ) : null;
-    }
-    // Can subscribe/upgrade: starter -> pro/agency; pro -> agency
-    const canUpgrade = (tier === "starter" && (plan === "pro" || plan === "agency")) || (tier === "pro" && plan === "agency");
-    if (canUpgrade) {
-      const buttonLabel = plan === "pro" ? "Get Pro" : "Get Agency";
-      return (
-        <Button onClick={() => handleSubscribe(plan)} disabled={loading} size={compact ? "sm" : "default"} className={buttonClass}>
-          {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : buttonLabel}
-        </Button>
-      );
-    }
+  if (tier === plan) {
+    return hasCustomer ? (
+      <Button onClick={handleManage} disabled={loading} size={size} variant="outline" className={compact ? undefined : buttonClass}>
+        {loading ? spinner : "Manage"}
+      </Button>
+    ) : null;
   }
 
-  return null;
+  if (TIER_RANK[plan] <= TIER_RANK[tier]) return null;
+
+  // Paying customers change plan in the Stripe portal (prorated, same subscription).
+  const upgradeInPortal = isPaidTier(tier) && hasCustomer;
+  const label = plan === "pro" ? "Get Pro" : upgradeInPortal ? "Upgrade to Agency" : "Get Agency";
+  return (
+    <Button
+      onClick={upgradeInPortal ? handleManage : () => handleSubscribe(plan)}
+      disabled={loading}
+      size={size}
+      className={buttonClass}
+    >
+      {loading ? spinner : label}
+    </Button>
+  );
 }

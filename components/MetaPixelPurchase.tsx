@@ -1,16 +1,12 @@
 "use client";
 
 // Fires CompleteRegistration for Google OAuth sign-ups.
-// Purchase/Subscribe events are handled in SubscriptionRefresh (not here) because
-// SubscriptionRefresh runs before this component mounts (Suspense timing issue).
+// The Purchase event fires in SubscriptionRefresh, once the server has verified the checkout.
 import { useEffect } from "react";
-import { useSearchParams } from "next/navigation";
 import { MetaPixel } from "@/lib/meta-pixel";
 import { createClient } from "@/lib/supabase-browser";
 
 export function MetaPixelPurchase() {
-  const searchParams = useSearchParams();
-
   // Handle Google OAuth sign-up: check for flag set on the sign-up page
   useEffect(() => {
     const pending = localStorage.getItem("meta_pixel_pending");
@@ -32,9 +28,6 @@ export function MetaPixelPurchase() {
       }
     });
   }, []); // run once on mount
-
-  // searchParams kept in scope to satisfy the Suspense requirement for useSearchParams
-  void searchParams;
 
   return null;
 }

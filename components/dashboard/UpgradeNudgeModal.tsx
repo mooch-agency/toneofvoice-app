@@ -11,11 +11,12 @@ import {
 import { Button } from "@/components/ui/button"
 import Link from "next/link"
 import { Check } from "lucide-react"
+import { TIER_LIMITS } from "@/lib/tiers"
 
 interface UpgradeNudgeModalProps {
   open: boolean
   onOpenChange: (open: boolean) => void
-  /** Optional: used/limit for copy */
+  /** Guides used and the plan limit, shown in the copy when known. */
   used?: number
   limit?: number
 }
@@ -35,14 +36,16 @@ export function UpgradeNudgeModal({
             Upgrade to create more guides
           </DialogTitle>
           <DialogDescription>
-            You have reached your plan limit. Upgrade to Pro or Agency to create
-            more guides for you and your clients.
+            {limit > 0
+              ? `You have used ${used} of ${limit} guides on your plan. `
+              : "You have reached your plan limit. "}
+            Upgrade to Pro or Agency to create more guides for you and your clients.
           </DialogDescription>
         </DialogHeader>
         <ul className="mt-3 space-y-2 text-sm text-gray-600">
           <li className="flex items-center gap-2">
             <Check className="h-4 w-4 shrink-0 text-green-600" />
-            Pro: 5 guides
+            {`Pro: ${TIER_LIMITS.pro} guides`}
           </li>
           <li className="flex items-center gap-2">
             <Check className="h-4 w-4 shrink-0 text-green-600" />

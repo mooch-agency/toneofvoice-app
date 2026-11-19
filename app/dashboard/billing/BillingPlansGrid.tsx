@@ -2,13 +2,14 @@
 
 import { Card, CardContent } from "@/components/ui/card"
 import { PRICING_TIERS, TIER_THEME, REFUND_ANSWER, SUPPORT_ANSWER, type PricingTier } from "@/lib/landing-data"
+import { TIER_LIMITS, type Tier } from "@/lib/tiers"
 import { BillingActions } from "./BillingActions"
 
-// Billing FAQs: aligned with homepage refund/support; Pro = 2 guides, Agency = unlimited (matches codebase)
+// Billing FAQs: aligned with homepage refund/support; guide limits come from lib/tiers.
 const BILLING_FAQS: { q: string; a: React.ReactNode }[] = [
   {
     q: "What do I get with Pro?",
-    a: "Full access: all sections (25 writing rules, Before & After examples, word list), AI assist, and up to 2 saved guides. Export as PDF, Word, or Markdown with subtle branding.",
+    a: `Full access: all sections (25 writing rules, Before & After examples, word list), AI assist, and up to ${TIER_LIMITS.pro} saved guides. Export as PDF, Word, or Markdown with subtle branding.`,
   },
   {
     q: "What do I get with Agency?",
@@ -25,20 +26,15 @@ const BILLING_FAQS: { q: string; a: React.ReactNode }[] = [
 ]
 
 type Props = {
-  tier: string
-  used: number
-  limit: number
+  /** Effective tier (lapsed paid plans count as starter). */
+  tier: Tier
+  /** e.g. "Pro plan — 1 of 2 guides" */
+  planLabel: string
   hasCustomer: boolean
   nextBilling: string | null
 }
 
-export function BillingPlansGrid({
-  tier,
-  used,
-  limit,
-  hasCustomer,
-  nextBilling,
-}: Props) {
+export function BillingPlansGrid({ tier, planLabel, hasCustomer, nextBilling }: Props) {
   return (
     <section className="w-full pt-4 pb-8 md:pt-6 md:pb-12">
       <div className="container px-4 md:px-6">
@@ -50,6 +46,13 @@ export function BillingPlansGrid({
           <p className="max-w-[700px] text-muted-foreground md:text-xl/relaxed lg:text-base/relaxed xl:text-xl/relaxed text-pretty">
             Unlock your full guide, edit anytime, and export in multiple formats
           </p>
+          <div className="flex flex-wrap items-center justify-center gap-3 pt-2 text-sm text-muted-foreground">
+            <span>
+              {planLabel}
+              {nextBilling ? ` · Next billing date ${nextBilling}` : ""}
+            </span>
+            <BillingActions hasCustomer={hasCustomer} tier={tier} compact />
+          </div>
         </div>
 
         <div className="mx-auto grid max-w-5xl gap-6 md:grid-cols-3">
@@ -104,7 +107,7 @@ function BillingPlanCard({
   hasCustomer,
 }: {
   tierData: PricingTier
-  currentTier: string
+  currentTier: Tier
   hasCustomer: boolean
 }) {
   const theme = TIER_THEME[tierData.id] ?? TIER_THEME.starter

@@ -7,6 +7,7 @@ import { BillingPlansGrid } from "./BillingPlansGrid";
 import { UserMenu } from "@/components/UserMenu";
 import Footer from "@/components/Footer";
 import { BillingPixelEvents } from "@/components/BillingPixelEvents";
+import { planSummary } from "../plan-summary";
 
 export default async function BillingPage() {
   const supabase = await createClient();
@@ -25,12 +26,10 @@ export default async function BillingPage() {
 
   const { count } = await supabase
     .from("style_guides")
-    .select("*", { count: "exact", head: true })
+    .select("id", { count: "exact", head: true })
     .eq("user_id", user.id);
 
-  const tier = (profile?.subscription_tier === "free" ? "starter" : profile?.subscription_tier) ?? "starter";
-  const limit = tier === "starter" ? 0 : tier === "pro" ? 2 : 99;
-  const used = count ?? 0;
+  const { tier, label } = planSummary(profile, count ?? 0);
   const nextBilling = profile?.current_period_end
     ? new Date(profile.current_period_end).toLocaleDateString()
     : null;
@@ -55,8 +54,7 @@ export default async function BillingPage() {
         </div>
         <BillingPlansGrid
           tier={tier}
-          used={used}
-          limit={limit}
+          planLabel={label}
           hasCustomer={!!profile?.stripe_customer_id}
           nextBilling={nextBilling}
         />
