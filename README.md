@@ -36,7 +36,7 @@ Open http://localhost:3000.
 
 ## Database
 
-Migrations live in `supabase/migrations/`. `002_security_hardening.sql` adds row-level security, the guide-limit trigger and the Stripe event table; review it, then apply it to staging before production.
+Migrations live in `supabase/migrations/`. `002_security_hardening.sql` adds row-level security, the guide-limit trigger and the Stripe event table; `003_rate_limits.sql` adds shared rate-limit counters. Review them, then apply to staging before production.
 
 ## License
 

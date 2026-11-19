@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server"
 import { requireUser, tooManyRequests } from "@/lib/api-auth"
-import { clientKey, rateLimit } from "@/lib/rate-limit"
+import { clientKey } from "@/lib/rate-limit"
+import { checkRateLimit } from "@/lib/rate-limit-durable"
 import { getSupabaseAdmin } from "@/lib/supabase-admin"
 import {
   ACTIVE_STATUSES,
@@ -28,7 +29,7 @@ export async function POST(req: Request) {
     if (!auth.ok) return auth.response
     const { supabase, user } = auth
 
-    const limited = rateLimit(`checkout:${clientKey(req, user.id)}`, { limit: 5, windowMs: 60_000 })
+    const limited = await checkRateLimit(`checkout:${clientKey(req, user.id)}`, { limit: 5, windowMs: 60_000 })
     if (!limited.ok) return tooManyRequests(limited.retryAfterSeconds)
 
     const body = (await req.json().catch(() => ({}))) as { plan?: unknown }

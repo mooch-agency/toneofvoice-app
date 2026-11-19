@@ -49,7 +49,7 @@ A paid tier only counts while the Stripe subscription is not lapsed (`effectiveT
 After sign-in, `/auth/claim` and `AutoSaveGuide` save the pending draft (`lib/pending-draft.ts`) to the account. Drafts older than 24 hours are dropped, so a shared browser never hands one visitor's draft to another. Sign-out clears all draft keys.
 
 ### 3. Subscribe and expand
-1. `POST /api/create-subscription-session` starts Stripe Checkout. Users who already pay get `409 { manageUrl }` and go to the billing portal instead.
+1. `POST /api/create-subscription-session` starts Stripe Checkout. A Pro user choosing Agency gets `409 { upgrade: true }` and, after confirming, `POST /api/change-plan` swaps the plan in place (prorated). Other existing subscribers get `409 { manageUrl }` (billing portal).
 2. Stripe calls `POST /api/webhook`; `lib/stripe.ts#applySubscriptionToProfile` writes the plan. `/dashboard?subscription=success&session_id=…` also calls `POST /api/verify-subscription` as a fallback.
 3. On a saved guide, "Generate full guide" calls `POST /api/expand-style-guide`. It fills only the placeholder sections, keeps placeholders for any section that failed (`502 { failedSections }`), and refuses to overwrite a guide that changed meanwhile (`409`).
 
@@ -85,20 +85,20 @@ After sign-in, `/auth/claim` and `AutoSaveGuide` save the pending draft (`lib/pe
 | `expand-style-guide` | paid | Generate the locked sections of a saved guide |
 | `save-style-guide` / `load-style-guide` / `delete-style-guide` | user | Guide storage (owner only; limit enforced) |
 | `user-guide-limit` / `user-subscription-tier` | user | Tier and usage for the UI |
-| `create-subscription-session` / `create-portal-session` / `verify-subscription` | user | Stripe |
+| `create-subscription-session` / `change-plan` / `create-portal-session` / `verify-subscription` | user | Stripe (checkout, in-app upgrade, portal, post-checkout sync) |
 | `webhook` | Stripe signature | Subscription events (deduped, retried on failure) |
 | `ai/command` | paid, rate limited | Plate.js AI commands (model fixed on the server) |
 | `export-pdf` | user, rate limited | Server PDF (JavaScript off, network locked down) |
 | `post-to-webflow` | shared secret | Zapier to Webflow blog publishing |
 | `cron/keep-alive` | `CRON_SECRET` | Keeps Supabase awake |
 
-Shared route helpers: `lib/api-auth.ts` (`requireUser`, `withRouteErrors`, `tooManyRequests`) and `lib/rate-limit.ts` (in memory, best effort per instance).
+Shared route helpers: `lib/api-auth.ts` (`requireUser`, `withRouteErrors`, `tooManyRequests`) and `lib/rate-limit-durable.ts` (`checkRateLimit`: shared Postgres counter from migration 003, falling back to the in-memory `lib/rate-limit.ts`).
 
 ### Security notes
-- `lib/url-validation.ts#assertPublicHttpUrl` blocks private, loopback, link-local and metadata addresses (including DNS answers). The scraper re-checks every redirect and only follows same-site links.
+- `lib/url-validation.ts#assertPublicHttpUrl` blocks private, loopback, link-local and metadata addresses (including DNS answers). The scraper fetches through `lib/safe-fetch.ts`, which validates the IP the socket actually connects to (no DNS rebinding), re-checks every redirect and only follows same-site links.
 - Redirect targets from URLs go through `lib/safe-redirect.ts`.
 - Server-only modules (`openai`, `stripe`, `supabase-admin`, scraper, PDF) import `server-only`, so a client import fails the build.
-- `supabase/migrations/002_security_hardening.sql` adds RLS, column privileges, the guide-limit trigger and the Stripe event table. Review it before applying.
+- `supabase/migrations/002_security_hardening.sql` adds RLS, column privileges, the guide-limit trigger and the Stripe event table; `003_rate_limits.sql` adds shared rate-limit counters. Review them before applying.
 
 ### AI
 - Extraction and generation: `gpt-5.2` through one shared OpenAI client (`lib/langsmith-openai.ts`, 60 s timeout, SDK retries). JSON answers are validated and retried once (`lib/llm-json.ts`).
@@ -151,7 +151,7 @@ node scripts/test-style-rules-detailed.mjs
 | Auth errors | Supabase URL/keys, RLS policies |
 | Paid user shows as Starter | `profiles.subscription_status`; Stripe webhook deliveries |
 | PDF export fails | Chromium binary on the host; the client falls back to html2pdf |
-| 429 responses | In-memory rate limits in `lib/rate-limit.ts` |
+| 429 responses | Limits in each route; counters in `public.rate_limits` (or in memory before migration 003) |
 
 ---
 

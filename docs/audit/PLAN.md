@@ -28,7 +28,7 @@ IDs below (SEC-n, AI-n, FE-n, DEP-n, ...) point into those reports.
 | D2 | A paid tier counts only while the subscription is not lapsed (`effectiveTier`). Unknown status keeps the tier. | Stops `past_due`/`unpaid` users keeping paid features; keeps manual grants working. |
 | D3 | Remove the legacy one-time payment flow: `/payment/success`, `/payment/cancel`, `/api/create-checkout-session`, the webhook's `mode: "payment"` branch, the guide page's "full-access" generation path, and `/api/generate-styleguide`. | Nothing creates a one-time checkout. The flow let anyone generate the paid guide (SEC-1/AI-1, FE-10). Paid content is produced only by `/api/expand-style-guide`, which checks the tier on the server. |
 | D4 | Remove orphan pages `/demo`, `/preview`, `/full-access`, `/brand-details`. Redirects live in `next.config.js`. | No inbound links (FE SIMP-2). |
-| D5 | Rate limiting uses `lib/rate-limit.ts` (in memory, best effort per instance). | No Redis in the stack. The API is swappable later. |
+| D5 | Rate limiting uses a shared database counter (`lib/rate-limit-durable.ts`, migration 003) and falls back to the in-memory limiter (`lib/rate-limit.ts`) until the migration is applied or if the database is unreachable. | No Redis in the stack; Postgres is already there. |
 | D6 | The database schema is not in the repo. WP-A writes a reviewed migration for RLS, column privileges and the guide-limit trigger. **The owner must review and apply it.** | SEC-10 cannot be verified from code. |
 | D7 | `/api/post-to-webflow` stays but requires `WEBFLOW_WEBHOOK_SECRET` (fails closed). Items still publish directly, as before. | It may still be used by Zapier. |
 | D8 | Keep `ai@5` with `@ai-sdk/react@2` (done in Phase 0). | Two copies of `ai` caused the editor type errors. |
@@ -127,9 +127,16 @@ IDs below (SEC-n, AI-n, FE-n, DEP-n, ...) point into those reports.
 
 Merge WP branches, run all gates and `next build`, run an independent review (`/code-review`-style subagent) on the full diff, fix findings, update `README.md` (merge `PROJECT.md` + `PROJECT_CONTEXT.md`), commit and push.
 
+## Phase D — second review round (orchestrator)
+
+After the independent review, three remaining limits were closed in code:
+- In-app Pro → Agency upgrade (`/api/change-plan`), so nothing depends on Stripe portal settings.
+- DNS rebinding in scraping closed with `lib/safe-fetch.ts` (the checked IP is the connected IP).
+- Shared rate limits across instances (`lib/rate-limit-durable.ts` + `003_rate_limits.sql`, verified on Postgres 16 under 40 parallel requests).
+
 ## Owner actions (cannot be done from code)
 
-- Review and apply `supabase/migrations/002_security_hardening.sql`.
+- Review and apply `supabase/migrations/002_security_hardening.sql` and `003_rate_limits.sql` (staging first).
 - Set `WEBFLOW_WEBHOOK_SECRET` (and in Zapier) if Webflow publishing is still used.
 - Set the Stripe webhook endpoint's API version to `2025-03-31.basil` (matches `lib/stripe.ts`) and subscribe it to `checkout.session.completed`, `customer.subscription.updated` and `customer.subscription.deleted`.
 - No portal plan-switching setting is needed: Pro → Agency upgrades happen in-app (`POST /api/change-plan`, prorated difference charged immediately). The Stripe Billing Portal ("Manage") is only used for managing payment details and cancelling. (Optional: enabling plan switching there lets Agency users downgrade to Pro without cancelling; nothing in the app depends on it.)

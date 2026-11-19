@@ -14,6 +14,8 @@ const SERVER_ONLY = [
   "lib/langsmith-openai.ts",
   "lib/stripe.ts",
   "lib/template-processor.ts",
+  "lib/safe-fetch.ts",
+  "lib/rate-limit-durable.ts",
 ]
 
 describe("server-only modules", () => {
