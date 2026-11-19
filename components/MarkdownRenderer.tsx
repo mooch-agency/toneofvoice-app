@@ -37,7 +37,6 @@ import { cn } from '@/lib/utils'
 interface MarkdownRendererProps {
   content: string
   className?: string
-  selectedTraits?: string[]
   /** Section id (e.g. examples, word-list) for section-specific rendering */
   sectionId?: string
 }
@@ -47,12 +46,12 @@ function getTextFromChildren(children: React.ReactNode): string {
   if (typeof children === "string") return children
   if (Array.isArray(children)) return children.map(getTextFromChildren).join("")
   if (children && typeof children === "object" && "props" in children) {
-    return getTextFromChildren((children as React.ReactElement).props.children)
+    return getTextFromChildren((children as React.ReactElement<{ children?: React.ReactNode }>).props.children)
   }
   return String(children ?? "")
 }
 
-export function MarkdownRenderer({ content, className, selectedTraits = [], sectionId }: MarkdownRendererProps) {
+export function MarkdownRenderer({ content, className, sectionId }: MarkdownRendererProps) {
   // Fix orphaned punctuation patterns
   const fixedContent = content
     .replace(/\s*\n\s*\)/g, ')') // Fix orphaned closing parentheses on new lines

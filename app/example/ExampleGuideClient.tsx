@@ -5,7 +5,7 @@
  * No auth required. All sections unlocked. Read-only.
  */
 
-import { useRef, useState, useCallback, useEffect } from "react"
+import { useMemo, useRef } from "react"
 import Link from "next/link"
 import { ArrowRight } from "lucide-react"
 import {
@@ -17,7 +17,7 @@ import { Separator } from "@/components/ui/separator"
 import { Button } from "@/components/ui/button"
 import { ExampleGuideSidebar } from "@/components/ExampleGuideSidebar"
 import { GuideView } from "@/components/GuideView"
-import type { GuideEditorRef } from "@/components/editor/GuideEditor"
+import { useScrollSpy } from "@/hooks/use-guide"
 import {
   EXAMPLE_GUIDE_SECTIONS,
   EXAMPLE_GUIDE_BRAND_NAME,
@@ -28,47 +28,8 @@ import {
 
 export default function ExampleGuideClient() {
   const scrollContainerRef = useRef<HTMLDivElement | null>(null)
-  // editorRef is required by GuideView's type but never used in read-only preview mode
-  const editorRef = useRef<GuideEditorRef | null>(null)
-
-  const [activeSectionId, setActiveSectionId] = useState<string>("cover")
-
-  // Scroll to section on sidebar click — matches useGuide's handleSectionSelect
-  const handleSectionSelect = useCallback((id: string) => {
-    setActiveSectionId(id)
-    document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" })
-  }, [])
-
-  // Scroll-spy: keep sidebar highlight in sync as user scrolls through the guide
-  useEffect(() => {
-    const container = scrollContainerRef.current
-    if (!container) return
-
-    const observer = new IntersectionObserver(
-      (entries) => {
-        const intersecting = entries
-          .filter((e) => e.isIntersecting)
-          .sort((a, b) => {
-            const aTop = (a.target as HTMLElement).getBoundingClientRect().top
-            const bTop = (b.target as HTMLElement).getBoundingClientRect().top
-            return aTop - bTop
-          })
-        const topmost = intersecting[0]
-        if (topmost) {
-          const id = (topmost.target as HTMLElement).id
-          if (id) setActiveSectionId(id)
-        }
-      },
-      // Trigger when section enters the upper third of the viewport
-      { root: container, rootMargin: "-20% 0px -60% 0px", threshold: 0 }
-    )
-
-    EXAMPLE_GUIDE_SECTIONS.forEach((s) => {
-      const el = document.getElementById(s.id)
-      if (el) observer.observe(el)
-    })
-    return () => observer.disconnect()
-  }, [])
+  const sectionIds = useMemo(() => EXAMPLE_GUIDE_SECTIONS.map((s) => s.id), [])
+  const { activeSectionId, handleSectionSelect } = useScrollSpy(sectionIds, scrollContainerRef)
 
   return (
     <SidebarProvider style={{ "--sidebar-width": "18rem" } as React.CSSProperties}>
@@ -105,26 +66,16 @@ export default function ExampleGuideClient() {
         <div className="flex flex-1 flex-col gap-0 p-2 md:p-4 pt-0 min-h-0 overflow-hidden">
           <GuideView
             sections={EXAMPLE_GUIDE_SECTIONS}
-            activeSectionId={activeSectionId}
             scrollContainerRef={scrollContainerRef}
             viewMode="preview"
-            onModeSwitch={() => {}}
-            content=""
             onContentChange={() => {}}
             brandName={EXAMPLE_GUIDE_BRAND_NAME}
-            guideType="core"
-            showPreviewBadge={false}
             isUnlocked={() => true}
-            isSectionLocked={false}
             onUpgrade={() => {}}
             editorKey={0}
-            editorRef={editorRef}
-            storageKey="example"
             editorId="example"
-            showEditTools={false}
             websiteUrl={EXAMPLE_GUIDE_WEBSITE_URL}
             subscriptionTier="agency"
-            showAI={false}
             coverDate={EXAMPLE_GUIDE_DATE}
             coverDisclaimer={EXAMPLE_GUIDE_DISCLAIMER}
             pdfFooter={<ExampleConversionBlock />}
