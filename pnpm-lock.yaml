@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@ai-sdk/anthropic':
+        specifier: ^2.0.115
+        version: 2.0.115(zod@4.3.6)
       '@ai-sdk/openai':
         specifier: ^2.0.0
         version: 2.0.91(zod@4.3.6)
@@ -281,6 +284,12 @@ packages:
 
   '@adobe/css-tools@4.5.0':
     resolution: {integrity: sha512-6OzddxPio9UiWTCemp4N8cYLV2ZN1ncRnV1cVGtve7dhPOtRkleRyx32GQCYSwDYgaHU3USMm84tNsvKzRCa1Q==}
+
+  '@ai-sdk/anthropic@2.0.115':
+    resolution: {integrity: sha512-wc1rU69QIqHksPKeWmcQiwdg1fYJXVFGa5wVlEvIqxqtFWeXe3arISBpX28A+IvS7MvbF7xL/fykr1mpbs/M1A==}
+    engines: {node: '>=18'}
+    peerDependencies:
+      zod: ^3.25.76 || ^4.1.8
 
   '@ai-sdk/gateway@2.0.182':
     resolution: {integrity: sha512-YreJd3QXpFxMKFZWcdf+amZC4pQTpqvZ8u3FJQMDwaD7cLtfJ5LmZowdmO4TypdGNHnOyULFEDt4KrgFvY7DDA==}
@@ -5747,6 +5756,12 @@ snapshots:
   '@acemir/cssom@0.9.31': {}
 
   '@adobe/css-tools@4.5.0': {}
+
+  '@ai-sdk/anthropic@2.0.115(zod@4.3.6)':
+    dependencies:
+      '@ai-sdk/provider': 2.0.5
+      '@ai-sdk/provider-utils': 3.0.46(zod@4.3.6)
+      zod: 4.3.6
 
   '@ai-sdk/gateway@2.0.182(zod@4.3.6)':
     dependencies:
